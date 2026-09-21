@@ -22,8 +22,11 @@ enum HwDecType {
   vulkanCopy('vulkan-copy', 'Vulkan (全平台) (实验性) (非直通)'),
   vdpau('vdpau', 'VDPAU (Linux)'),
   vdpauCopy('vdpau-copy', 'VDPAU (Linux) (非直通)'),
-  mediacodec('mediacodec', 'MediaCodec (Android)'),
-  mediacodecCopy('mediacodec-copy', 'MediaCodec (Android) (非直通)'),
+  mediacodec('mediacodec', 'MediaCodec (Android) (直通，部分机型可能有声无画)'),
+  mediacodecCopy(
+    'mediacodec-copy',
+    'MediaCodec (Android) (非直通，Flutter/gpu 更稳)',
+  ),
   cuda('cuda', 'CUDA (NVIDIA独占) (过时)'),
   cudaCopy('cuda-copy', 'CUDA (NVIDIA独占) (过时) (非直通)'),
   crystalhd('crystalhd', 'CrystalHD (全平台) (过时)'),
@@ -31,15 +34,24 @@ enum HwDecType {
   amf('amf', 'AMF (AMD独占)'),
   amfCopy('amf-copy', 'AMF (AMD独占) (非直通)'),
   qsv('qsv', 'Quick Sync Video (Intel独占)'),
-  qsvCopy('qsv-copy', 'Quick Sync Video (Intel独占) (非直通)'),
-  ;
+  qsvCopy('qsv-copy', 'Quick Sync Video (Intel独占) (非直通)');
 
   final String hwdec;
   final String desc;
   const HwDecType(this.hwdec, this.desc);
 
+  /// Copy-back first: media_kit renders with `--vo=gpu` into a Flutter
+  /// SurfaceTexture. Zero-copy `mediacodec` is meant for `mediacodec_embed`
+  /// and is a known "picture frozen, audio continues" path on Samsung
+  /// MediaCodec (and other devices) when paired with `vo=gpu`.
   static final String androidDefault = [
-    HwDecType.mediacodec.hwdec,
+    HwDecType.mediacodecCopy.hwdec,
     HwDecType.autoSafe.hwdec,
   ].join(',');
+
+  /// mpv `hwdec-current` for zero-copy Android MediaCodec (not copy-back).
+  static bool isDirectMediacodec(String? hwdecCurrent) {
+    if (hwdecCurrent == null) return false;
+    return hwdecCurrent.trim() == mediacodec.hwdec;
+  }
 }

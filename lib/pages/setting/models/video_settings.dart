@@ -213,7 +213,8 @@ List<SettingsModel> get videoSettings => [
   NormalModel(
     title: '硬解模式',
     leading: const Icon(Icons.memory_outlined),
-    getSubtitle: () => '当前：${Pref.hardwareDecoding}（此项即mpv的--hwdec）',
+    getSubtitle: () =>
+        '当前：${Pref.hardwareDecoding}（mpv --hwdec；Android 默认 mediacodec-copy，避免直通硬解有声无画）',
     onTap: _showHwDecDialog,
   ),
 ];

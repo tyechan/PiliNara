@@ -30,8 +30,10 @@ import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/speed_lock_hint.dart';
+import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/video_stall_monitor.dart';
 import 'package:PiliPlus/services/live_pip_overlay_service.dart';
 import 'package:PiliPlus/services/pip_overlay_service.dart';
 import 'package:PiliPlus/services/service_locator.dart';
@@ -56,7 +58,8 @@ import 'package:PiliPlus/utils/video_utils.dart';
 import 'package:archive/archive.dart' show getCrc32;
 import 'package:canvas_danmaku/canvas_danmaku.dart';
 import 'package:easy_debounce/easy_throttle.dart';
-import 'package:flutter/foundation.dart' show clampDouble, kDebugMode;
+import 'package:flutter/foundation.dart'
+    show clampDouble, debugPrint, kDebugMode;
 import 'package:flutter/services.dart' show HapticFeedback, DeviceOrientation;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
@@ -185,13 +188,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   String get bvid => _bvid!;
 
-  bool isCurrentVideoSource({
-    required String bvid,
-    required int cid,
-  }) =>
-      dataStatus.value == DataStatus.loaded &&
-      _bvid == bvid &&
-      this.cid == cid;
+  bool isCurrentVideoSource({required String bvid, required int cid}) =>
+      dataStatus.value == DataStatus.loaded && _bvid == bvid && this.cid == cid;
 
   /// 视频播放速度
   double get playbackSpeed => _playbackSpeed.value;
@@ -448,14 +446,19 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       (tempPlayerConf ? 0 : Pref.videoSaturation).obs;
   late final RxInt videoGamma = (tempPlayerConf ? 0 : Pref.videoGamma).obs;
   late final RxInt videoHue = (tempPlayerConf ? 0 : Pref.videoHue).obs;
-  late final RxInt audioDelayMs =
-      (tempPlayerConf ? 0 : Pref.audioDelayMs).obs;
+  late final RxInt audioDelayMs = (tempPlayerConf ? 0 : Pref.audioDelayMs).obs;
   Timer? _videoPictureSaveTimer;
 
   late int? cacheVideoQa = PlatformUtils.isMobile ? null : Pref.defaultVideoQa;
   late int cacheAudioQa = Pref.defaultAudioQa;
   bool enableHeart = true;
   late final String? hwdec = Pref.enableHA ? Pref.hardwareDecoding : null;
+
+  /// Android-only: detect video PTS stall while audio/clock keeps moving.
+  final VideoStallMonitor _videoStallMonitor = VideoStallMonitor();
+  Timer? _videoStallPollTimer;
+  bool _videoStallRecovering = false;
+  int? _lastTextureId;
 
   late final progressType = Pref.btmProgressBehavior;
   late final enableQuickDouble = Pref.enableQuickDouble;
@@ -752,19 +755,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         : SuperResolutionType.disable;
     superResolutionType.value = defaultSuperResolutionType;
     if (_videoPlayerController != null) {
-      unawaited(
-        setShader(defaultSuperResolutionType, _videoPlayerController!),
-      );
+      unawaited(setShader(defaultSuperResolutionType, _videoPlayerController!));
     }
 
     resetAllVideoPictureParameters(persist: false);
   }
 
-  int _normalizeVideoPictureParameter(num value) =>
-      value.round().clamp(
-        videoPictureParameterMin,
-        videoPictureParameterMax,
-      ).toInt();
+  int _normalizeVideoPictureParameter(num value) => value
+      .round()
+      .clamp(videoPictureParameterMin, videoPictureParameterMax)
+      .toInt();
 
   RxInt? _videoPictureParameterState(String property) => switch (property) {
     'brightness' => videoBrightness,
@@ -1066,10 +1066,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final opt = {
       'video-sync': Pref.videoSync,
       if (Platform.isAndroid) 'ao': Pref.audioOutput,
-      'volume': (PlatformUtils.isMobile
-              ? (Pref.enableAppVolume ? volume.value * 100 : Pref.playerVolume)
-              : volume.value * 100)
-          .toString(),
+      'volume':
+          (PlatformUtils.isMobile
+                  ? (Pref.enableAppVolume
+                        ? volume.value * 100
+                        : Pref.playerVolume)
+                  : volume.value * 100)
+              .toString(),
       'volume-max': kMaxVolume.toString(),
     };
     final autosync = Pref.autosync;
@@ -1079,7 +1082,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     final player = await Player.create(
       configuration: PlayerConfiguration(
-        logLevel: kDebugMode ? .warn : .error,
+        logLevel: (kDebugMode || Pref.enableLog) ? .warn : .error,
         options: opt,
       ),
     );
@@ -1163,14 +1166,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     assert(!isLive || seekTo == null);
     await player.open(
-      Media(
-        video,
-        start: seekTo,
-        extras: extras.isEmpty ? null : extras,
-      ),
+      Media(video, start: seekTo, extras: extras.isEmpty ? null : extras),
       play: false,
     );
     applyVideoPictureParameters(player);
+    _videoStallMonitor.resetForNewMedia();
   }
 
   Future<void>? refreshPlayer() {
@@ -1297,17 +1297,31 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           isLive,
         );
       }),
-      if (kDebugMode)
-        stream.log.listen(((PlayerLog log) {
+      if (kDebugMode || Pref.enableLog)
+        stream.log.listen((PlayerLog log) {
           if (log.level == 'error' || log.level == 'fatal') {
+            VideoStallLog.mpv(
+              level: log.level,
+              prefix: log.prefix,
+              text: log.text,
+            );
             Utils.reportError(
               '${log.level}: ${log.prefix}: ${log.text}\n${player.state.playlist}',
               null,
             );
           } else {
-            debugPrint(log.toString());
+            if (Platform.isAndroid) {
+              VideoStallLog.mpv(
+                level: log.level,
+                prefix: log.prefix,
+                text: log.text,
+              );
+            }
+            if (kDebugMode) {
+              debugPrint(log.toString());
+            }
           }
-        })),
+        }),
       stream.error.listen((String event) {
         if (dataSource is FileSource &&
             event.startsWith("Failed to open file")) {
@@ -1368,13 +1382,134 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         }
       }),
     ];
+    _startVideoStallMonitor(player);
   }
 
   /// 移除事件监听
   void _removeListeners() {
+    _stopVideoStallMonitor();
     _subscriptions?.forEach((e) => e.cancel());
     _subscriptions?.clear();
     _subscriptions = null;
+  }
+
+  void _startVideoStallMonitor(NativePlayer player) {
+    _stopVideoStallMonitor();
+    if (!Platform.isAndroid) return;
+
+    _lastTextureId = _videoController?.id.value;
+    _videoController?.id.addListener(_onVideoTextureId);
+    _videoStallPollTimer = Timer.periodic(kVideoStallPollInterval, (_) {
+      _pollVideoStall(player);
+    });
+  }
+
+  void _stopVideoStallMonitor() {
+    _videoStallPollTimer?.cancel();
+    _videoStallPollTimer = null;
+    _videoController?.id.removeListener(_onVideoTextureId);
+    _videoStallRecovering = false;
+  }
+
+  void _onVideoTextureId() {
+    final id = _videoController?.id.value;
+    if (id == _lastTextureId) return;
+    VideoStallLog.surface(from: _lastTextureId, to: id);
+    _lastTextureId = id;
+  }
+
+  String _mpvProperty(NativePlayer player, String name) {
+    try {
+      return player.getProperty(name);
+    } catch (_) {
+      return '';
+    }
+  }
+
+  VideoStallSnapshot _readVideoStallSnapshot(NativePlayer player) {
+    double? asDouble(String name) =>
+        double.tryParse(_mpvProperty(player, name));
+    int? asInt(String name) => int.tryParse(_mpvProperty(player, name));
+    final state = player.state;
+    return VideoStallSnapshot(
+      playerStatus: playerStatus.value,
+      playing: state.playing,
+      isBuffering: isBuffering.value,
+      isSeeking: isSeeking.value,
+      onlyPlayAudio: onlyPlayAudio.value,
+      isLive: isLive,
+      timePos: asDouble('time-pos'),
+      videoPts: asDouble('video-pts'),
+      audioPts: asDouble('audio-pts'),
+      estimatedVfFps: asDouble('estimated-vf-fps'),
+      dropFrameCount: asInt('drop-frame-count'),
+      voDropFrameCount: asInt('vo-drop-frame-count'),
+      voDelayedFrameCount: asInt('vo-delayed-frame-count'),
+      hwdec: hwdec ?? 'no',
+      hwdecCurrent: _mpvProperty(player, 'hwdec-current'),
+      vo: _mpvProperty(player, 'current-vo'),
+      videoFormat: _mpvProperty(player, 'video-format'),
+      videoCodec: _mpvProperty(player, 'video-codec'),
+      audioCodec: _mpvProperty(player, 'audio-codec'),
+      vid: _mpvProperty(player, 'vid'),
+      pausedForCache: _mpvProperty(player, 'paused-for-cache'),
+      coreIdle: _mpvProperty(player, 'core-idle'),
+      speed: asDouble('speed') ?? state.rate,
+      videoSync: _mpvProperty(player, 'video-sync'),
+      textureId: _videoController?.id.value,
+      width: state.width,
+      height: state.height,
+    );
+  }
+
+  void _pollVideoStall(NativePlayer player) {
+    if (_playerCount == 0 || _videoStallRecovering) return;
+    try {
+      final snap = _readVideoStallSnapshot(player);
+      final result = _videoStallMonitor.observe(snap);
+      if (result.logStart) {
+        VideoStallLog.start(snap);
+      }
+      if (result.isStalled) {
+        VideoStallLog.stall(snap, recoveries: _videoStallMonitor.recoveries);
+      }
+      if (result.recovery case final action?) {
+        unawaited(_recoverVideoStall(player, action, snap));
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[$kVideoStallLogTag] poll failed: $e');
+      }
+    }
+  }
+
+  Future<void> _recoverVideoStall(
+    NativePlayer player,
+    VideoStallRecoveryAction action,
+    VideoStallSnapshot snap,
+  ) async {
+    if (_videoStallRecovering || _playerCount == 0) return;
+    _videoStallRecovering = true;
+    VideoStallLog.recovery(action, snap);
+    try {
+      switch (action) {
+        case VideoStallRecoveryAction.seekFlush:
+          await player.seek(player.state.position);
+        case VideoStallRecoveryAction.switchToCopyHwdec:
+          try {
+            player.setProperty('hwdec', HwDecType.mediacodecCopy.hwdec);
+          } catch (_) {}
+          await player.seek(player.state.position);
+        case VideoStallRecoveryAction.reopen:
+          await refreshPlayer();
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[$kVideoStallLogTag] recovery ${action.name} failed: $e');
+      }
+    } finally {
+      _videoStallRecovering = false;
+    }
   }
 
   void _cancelSubForSeek() {
@@ -2201,10 +2336,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     } else {
       // 点播：vid=no
       try {
-        _videoPlayerController?.setProperty(
-          'file-local-options/vid',
-          'no',
-        );
+        _videoPlayerController?.setProperty('file-local-options/vid', 'no');
       } catch (_) {
         onlyPlayAudio.value = false;
         _autoAudioState = AutoAudioOnlyState.idle;
@@ -2353,8 +2485,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }
 
   void _interruptAutoAudioRestore() {
-    if (!_autoAudioRestoreInProgress &&
-        _autoAudioRestoreCompleter == null) {
+    if (!_autoAudioRestoreInProgress && _autoAudioRestoreCompleter == null) {
       return;
     }
     _autoAudioRestoreGeneration++;
@@ -2754,7 +2885,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         context: Get.context!,
         builder: (context) => GestureDetector(
           onTap: () async {
-            final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+            final bytes = await image.toByteData(
+              format: ui.ImageByteFormat.png,
+            );
             if (bytes != null) {
               final time = DurationUtils.formatDuration(
                 positionInMilliseconds / 1000,
