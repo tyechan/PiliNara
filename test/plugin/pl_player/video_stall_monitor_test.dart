@@ -227,4 +227,56 @@ void main() {
     );
     expect(again.logStart, isFalse);
   });
+
+  test('codecFamily maps avc/hevc/av1 from codec or format', () {
+    expect(_snap().codecFamily, 'avc');
+    expect(
+      VideoStallSnapshot(
+        playerStatus: PlayerStatus.playing,
+        playing: true,
+        isBuffering: false,
+        isSeeking: false,
+        onlyPlayAudio: false,
+        isLive: false,
+        timePos: 1,
+        videoPts: 1,
+        audioPts: 1,
+        estimatedVfFps: 24,
+        dropFrameCount: 0,
+        voDropFrameCount: 0,
+        voDelayedFrameCount: 0,
+        hwdec: 'mediacodec-copy,auto-safe',
+        hwdecCurrent: 'mediacodec-copy',
+        vo: 'gpu',
+        videoFormat: 'hevc',
+        videoCodec: 'hevc',
+        audioCodec: 'aac',
+        vid: '1',
+        pausedForCache: 'no',
+        coreIdle: 'no',
+        speed: 1,
+        videoSync: 'display-resample',
+        textureId: 3,
+        width: 3840,
+        height: 2160,
+        decoderFrameDropCount: 2,
+        containerFps: 60,
+        cacheUsed: '12MiB',
+        demuxerCacheDuration: '8.5',
+        bufferedSec: 8,
+        playerReused: true,
+        mediaPath: 'https://example.test/av1',
+        appScene: 'pip',
+      ).codecFamily,
+      'hevc',
+    );
+    expect(
+      _snap().toLogLine(),
+      contains('hwdecRequested=mediacodec,auto-safe'),
+    );
+    expect(_snap().toLogLine(), contains('hwdecCurrent=mediacodec'));
+    expect(_snap().toLogLine(), contains('codec=avc'));
+    expect(_snap().toLogLine(), contains('reusedPlayer=false'));
+    expect(_snap().toLogLine(), contains('scene=foreground'));
+  });
 }

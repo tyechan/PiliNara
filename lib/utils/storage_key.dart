@@ -20,6 +20,8 @@ abstract final class SettingBoxKey {
       hardwareDecoding = 'hardwareDecoding',
       videoSync = 'videoSync',
       autosync = 'autosync',
+      videoStallAutoRecover = 'videoStallAutoRecover',
+      videoStallVerboseLog = 'videoStallVerboseLog',
       p1080 = 'p1080',
       enableAutoEnter = 'enableAutoEnter',
       enableAutoExit = 'enableAutoExit',

@@ -1109,6 +1109,12 @@ abstract final class Pref {
   static bool get enableLog =>
       _setting.get(SettingBoxKey.enableLog, defaultValue: true);
 
+  static bool get videoStallAutoRecover =>
+      _setting.get(SettingBoxKey.videoStallAutoRecover, defaultValue: true);
+
+  static bool get videoStallVerboseLog =>
+      _setting.get(SettingBoxKey.videoStallVerboseLog, defaultValue: true);
+
   static bool get disableAudioCDN =>
       _setting.get(SettingBoxKey.disableAudioCDN, defaultValue: false);
 

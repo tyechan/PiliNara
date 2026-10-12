@@ -556,6 +556,20 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Timer? _videoStallPollTimer;
   bool _videoStallRecovering = false;
   int? _lastTextureId;
+  bool _playerReused = false;
+  String _stallMediaPath = '';
+
+  String get _stallAppScene {
+    if (isNativePip.value || _isInInAppPip || isPipMode) return 'pip';
+    switch (_lastAppLifecycleState) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        return 'background';
+      default:
+        return 'foreground';
+    }
+  }
 
   late final progressType = Pref.btmProgressBehavior;
   late final enableQuickDouble = Pref.enableQuickDouble;
@@ -1185,7 +1199,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     final player = await Player.create(
       configuration: PlayerConfiguration(
-        logLevel: (kDebugMode || Pref.enableLog) ? .warn : .error,
+        logLevel: Pref.videoStallVerboseLog
+            ? .debug
+            : ((kDebugMode || Pref.enableLog) ? .warn : .error),
         options: opt,
       ),
     );
@@ -1229,6 +1245,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     danmakuController?.clear();
 
     var player = _videoPlayerController;
+    _playerReused = player != null;
 
     if (player == null) {
       player = await _initPlayer();
@@ -1278,6 +1295,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       play: false,
     );
     applyVideoPictureParameters(player);
+    _stallMediaPath = video;
     _videoStallMonitor.resetForNewMedia();
   }
 
@@ -1431,9 +1449,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _updatePlaybackState();
         }
       }),
-      if (kDebugMode || Pref.enableLog)
+      if (kDebugMode || Pref.enableLog || Pref.videoStallVerboseLog)
         stream.log.listen((PlayerLog log) {
-          if (log.level == 'error' || log.level == 'fatal') {
+          final level = log.level.toLowerCase();
+          final isError = level == 'error' || level == 'fatal';
+          if (isError) {
             VideoStallLog.mpv(
               level: log.level,
               prefix: log.prefix,
@@ -1443,17 +1463,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
               '${log.level}: ${log.prefix}: ${log.text}\n${player.state.playlist}',
               null,
             );
-          } else {
-            if (Platform.isAndroid) {
-              VideoStallLog.mpv(
-                level: log.level,
-                prefix: log.prefix,
-                text: log.text,
-              );
-            }
-            if (kDebugMode) {
-              debugPrint(log.toString());
-            }
+          } else if (Platform.isAndroid && _shouldForwardMpvLog(log)) {
+            VideoStallLog.mpv(
+              level: log.level,
+              prefix: log.prefix,
+              text: log.text,
+            );
+          }
+          if (kDebugMode) {
+            debugPrint(log.toString());
           }
         }),
       stream.error.listen((String event) {
@@ -1560,6 +1578,28 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
+  /// Always keep warn/error. With the verbose toggle, also keep vd/vo/hwdec debug.
+  static bool _shouldForwardMpvLog(PlayerLog log) {
+    final level = log.level.toLowerCase();
+    if (level == 'error' ||
+        level == 'fatal' ||
+        level == 'warn' ||
+        level == 'warning') {
+      return true;
+    }
+    if (!Pref.videoStallVerboseLog) return false;
+    final prefix = log.prefix.toLowerCase();
+    return prefix.startsWith('vd') ||
+        prefix.startsWith('vo') ||
+        prefix.startsWith('vf') ||
+        prefix.startsWith('ad') ||
+        prefix.startsWith('ao') ||
+        prefix.contains('hwdec') ||
+        prefix.contains('mediacodec') ||
+        prefix.contains('ffmpeg') ||
+        prefix.contains('decode');
+  }
+
   VideoStallSnapshot _readVideoStallSnapshot(NativePlayer player) {
     double? asDouble(String name) =>
         double.tryParse(_mpvProperty(player, name));
@@ -1576,7 +1616,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       videoPts: asDouble('video-pts'),
       audioPts: asDouble('audio-pts'),
       estimatedVfFps: asDouble('estimated-vf-fps'),
-      dropFrameCount: asInt('drop-frame-count'),
+      dropFrameCount: asInt('frame-drop-count') ?? asInt('drop-frame-count'),
       voDropFrameCount: asInt('vo-drop-frame-count'),
       voDelayedFrameCount: asInt('vo-delayed-frame-count'),
       hwdec: hwdec ?? 'no',
@@ -1593,6 +1633,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       textureId: _videoController?.id.value,
       width: state.width,
       height: state.height,
+      decoderFrameDropCount: asInt('decoder-frame-drop-count'),
+      containerFps: asDouble('container-fps'),
+      cacheUsed: _mpvProperty(player, 'cache-used'),
+      demuxerCacheDuration: _mpvProperty(player, 'demuxer-cache-duration'),
+      bufferedSec: buffered.value,
+      playerReused: _playerReused,
+      mediaPath: _stallMediaPath,
+      appScene: _stallAppScene,
     );
   }
 
@@ -1608,7 +1656,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         VideoStallLog.stall(snap, recoveries: _videoStallMonitor.recoveries);
       }
       if (result.recovery case final action?) {
-        unawaited(_recoverVideoStall(player, action, snap));
+        if (Pref.videoStallAutoRecover) {
+          unawaited(_recoverVideoStall(player, action, snap));
+        } else {
+          VideoStallLog.recoverySkipped(snap);
+        }
       }
     } catch (e) {
       if (kDebugMode) {

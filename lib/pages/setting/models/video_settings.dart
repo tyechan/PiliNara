@@ -217,6 +217,20 @@ List<SettingsModel> get videoSettings => [
         '当前：${Pref.hardwareDecoding}（mpv --hwdec；Android 默认 mediacodec-copy，避免直通硬解有声无画）',
     onTap: _showHwDecDialog,
   ),
+  const SwitchModel(
+    title: '画面冻结自动恢复',
+    subtitle: '检测到有声无画时自动 seek / 切硬解 / 重开。抓「纯冻结」日志时请关掉',
+    leading: Icon(Icons.healing_outlined),
+    setKey: SettingBoxKey.videoStallAutoRecover,
+    defaultVal: true,
+  ),
+  const SwitchModel(
+    title: '画面冻结详细日志',
+    subtitle: '提高 mpv vd/vo/hwdec 日志级别，写入 PiliVideoStall。略增耗电，抓 bug 时保持开启',
+    leading: Icon(Icons.bug_report_outlined),
+    setKey: SettingBoxKey.videoStallVerboseLog,
+    defaultVal: true,
+  ),
 ];
 
 Future<void> _showCDNDialog(BuildContext context, VoidCallback setState) async {

@@ -1,11 +1,17 @@
+import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:io';
 
 import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 /// Logcat tag: `adb logcat -s PiliVideoStall flutter`
 const String kVideoStallLogTag = 'PiliVideoStall';
+
+const String kVideoStallLogFileName = 'pili_video_stall.log';
 
 /// Cheap 1 Hz poll is enough to catch "picture frozen, audio continues".
 const Duration kVideoStallPollInterval = Duration(seconds: 1);
@@ -60,6 +66,14 @@ class VideoStallSnapshot {
     required this.textureId,
     required this.width,
     required this.height,
+    this.decoderFrameDropCount,
+    this.containerFps,
+    this.cacheUsed = '',
+    this.demuxerCacheDuration = '',
+    this.bufferedSec = 0,
+    this.playerReused = false,
+    this.mediaPath = '',
+    this.appScene = 'foreground',
   });
 
   final PlayerStatus playerStatus;
@@ -89,6 +103,14 @@ class VideoStallSnapshot {
   final int? textureId;
   final int? width;
   final int? height;
+  final int? decoderFrameDropCount;
+  final double? containerFps;
+  final String cacheUsed;
+  final String demuxerCacheDuration;
+  final int bufferedSec;
+  final bool playerReused;
+  final String mediaPath;
+  final String appScene;
 
   /// Audio/playback clock: prefer audio PTS, fall back to time-pos.
   double? get clockPts => audioPts ?? timePos;
@@ -105,17 +127,40 @@ class VideoStallSnapshot {
       pausedForCache != 'yes' &&
       pausedForCache != 'true';
 
+  String get codecFamily {
+    final raw = '${videoCodec.toLowerCase()} ${videoFormat.toLowerCase()}';
+    if (raw.contains('av1') || raw.contains('av01')) return 'av1';
+    if (raw.contains('hevc') ||
+        raw.contains('h265') ||
+        raw.contains('hev1') ||
+        raw.contains('hvc1')) {
+      return 'hevc';
+    }
+    if (raw.contains('avc') || raw.contains('h264')) return 'avc';
+    return videoFormat.isEmpty ? '-' : videoFormat;
+  }
+
   String toLogLine() {
     final size = (width != null && height != null) ? '${width}x$height' : '-';
+    final path = mediaPath.length > 160
+        ? '${mediaPath.substring(0, 160)}…'
+        : mediaPath;
     return 'playing=$playing status=${playerStatus.name} '
         'buffering=$isBuffering seeking=$isSeeking audioOnly=$onlyPlayAudio '
-        'live=$isLive timePos=${_fmt(timePos)} videoPts=${_fmt(videoPts)} '
-        'audioPts=${_fmt(audioPts)} vfFps=${_fmt(estimatedVfFps)} '
-        'drop=$dropFrameCount voDrop=$voDropFrameCount delayed=$voDelayedFrameCount '
-        'hwdec=$hwdec hwdecCurrent=$hwdecCurrent vo=$vo format=$videoFormat '
+        'live=$isLive scene=$appScene reusedPlayer=$playerReused '
+        'timePos=${_fmt(timePos)} videoPts=${_fmt(videoPts)} '
+        'audioPts=${_fmt(audioPts)} fps=${_fmt(containerFps)} '
+        'vfFps=${_fmt(estimatedVfFps)} '
+        'frameDrop=$dropFrameCount decoderDrop=$decoderFrameDropCount '
+        'voDrop=$voDropFrameCount delayed=$voDelayedFrameCount '
+        'hwdecRequested=$hwdec hwdecCurrent=$hwdecCurrent vo=$vo '
+        'codec=$codecFamily format=$videoFormat '
         'vcodec=$videoCodec acodec=$audioCodec vid=$vid '
         'pausedForCache=$pausedForCache coreIdle=$coreIdle '
-        'speed=${_fmt(speed)} videoSync=$videoSync textureId=$textureId size=$size';
+        'cacheUsed=$cacheUsed demuxerCache=$demuxerCacheDuration '
+        'bufferedSec=$bufferedSec '
+        'speed=${_fmt(speed)} videoSync=$videoSync textureId=$textureId size=$size '
+        'path=$path';
   }
 
   static String _fmt(double? value) =>
@@ -244,6 +289,9 @@ class VideoStallMonitor {
 }
 
 abstract final class VideoStallLog {
+  static final List<String> _pending = [];
+  static bool _flushing = false;
+
   static void start(VideoStallSnapshot snap) =>
       _log('START ${snap.toLogLine()}');
 
@@ -254,6 +302,9 @@ abstract final class VideoStallLog {
     VideoStallRecoveryAction action,
     VideoStallSnapshot snap,
   ) => _log('RECOVERY action=${action.name} ${snap.toLogLine()}');
+
+  static void recoverySkipped(VideoStallSnapshot snap) =>
+      _log('STALL_NO_RECOVERY autoRecover=off ${snap.toLogLine()}');
 
   static void surface({required int? from, required int? to}) {
     final kind = to == null ? 'SURFACE_INVALID' : 'SURFACE';
@@ -269,5 +320,53 @@ abstract final class VideoStallLog {
   static void _log(String message) {
     developer.log(message, name: kVideoStallLogTag);
     debugPrint('[$kVideoStallLogTag] $message');
+    _pending.add('${DateTime.now().toIso8601String()} $message');
+    unawaited(_flush());
+  }
+
+  static Future<File> logFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File(p.join(dir.path, kVideoStallLogFileName));
+  }
+
+  static Future<String> readExportText() async {
+    try {
+      await _flush();
+      final file = await logFile();
+      if (!file.existsSync()) {
+        return '[$kVideoStallLogTag] no freeze log yet';
+      }
+      return file.readAsStringSync();
+    } catch (e) {
+      return '[$kVideoStallLogTag] read failed: $e';
+    }
+  }
+
+  static Future<void> clearFile() async {
+    try {
+      _pending.clear();
+      final file = await logFile();
+      if (file.existsSync()) {
+        await file.writeAsString('', flush: true);
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> _flush() async {
+    if (_flushing || _pending.isEmpty) return;
+    _flushing = true;
+    try {
+      final file = await logFile();
+      final chunk = '${_pending.join('\n')}\n';
+      _pending.clear();
+      await file.writeAsString(chunk, mode: FileMode.append, flush: true);
+    } catch (_) {
+      // Tests / missing path_provider must not crash playback.
+    } finally {
+      _flushing = false;
+      if (_pending.isNotEmpty) {
+        unawaited(_flush());
+      }
+    }
   }
 }

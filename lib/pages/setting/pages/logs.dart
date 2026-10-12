@@ -6,6 +6,7 @@ import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/flutter/popup_menu.dart';
 import 'package:PiliPlus/common/widgets/loading_widget/loading_widget.dart';
 import 'package:PiliPlus/common/widgets/selection_text.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/video_stall_monitor.dart';
 import 'package:PiliPlus/services/logger.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -89,7 +90,21 @@ class _LogsPageState extends State<LogsPage> {
     }
   }
 
+  Future<void> copyVideoStallLogs() async {
+    final text = await VideoStallLog.readExportText();
+    Utils.copyText('```\n$text\n```', needToast: false);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已复制画面冻结日志，可粘贴到备忘录或发给开发者'),
+          duration: _snackBarDisplayDuration,
+        ),
+      );
+    }
+  }
+
   Future<void> clearLogs() async {
+    await VideoStallLog.clearFile();
     if (await LoggerUtils.clearLogs()) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -143,6 +158,10 @@ class _LogsPageState extends State<LogsPage> {
               PopupMenuItem(
                 onTap: copyLogs,
                 child: const Text('复制日志'),
+              ),
+              PopupMenuItem(
+                onTap: copyVideoStallLogs,
+                child: const Text('复制画面冻结日志'),
               ),
               PopupMenuItem(
                 onTap: () =>
