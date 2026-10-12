@@ -231,6 +231,19 @@ List<SettingsModel> get videoSettings => [
     setKey: SettingBoxKey.videoStallVerboseLog,
     defaultVal: true,
   ),
+  const SwitchModel(
+    title: '多线程加速（实验）',
+    subtitle: '点播经本机代理，按 Range 并行从多个大陆 CDN 拉流。海外线路卡顿/冻结时可开。失败则回退直连',
+    leading: Icon(Icons.speed_outlined),
+    setKey: SettingBoxKey.vodMultiConnProxy,
+    defaultVal: true,
+  ),
+  NormalModel(
+    title: '多线程连接数',
+    leading: const Icon(Icons.tune_outlined),
+    getSubtitle: () => '当前：${Pref.vodMultiConnThreads}（1–16，默认 6）',
+    onTap: _showVodThreadDialog,
+  ),
 ];
 
 Future<void> _showCDNDialog(BuildContext context, VoidCallback setState) async {
@@ -666,3 +679,22 @@ void _showBufferSecDialog(BuildContext context, VoidCallback setState) =>
       title: '缓冲时长',
       suffix: 's',
     );
+
+Future<void> _showVodThreadDialog(
+  BuildContext context,
+  VoidCallback setState,
+) async {
+  const choices = [1, 2, 4, 6, 8, 12, 16];
+  final res = await showDialog<int>(
+    context: context,
+    builder: (context) => SelectDialog<int>(
+      title: '多线程连接数',
+      value: Pref.vodMultiConnThreads,
+      values: choices.map((e) => (e, '$e')).toList(),
+    ),
+  );
+  if (res != null) {
+    await GStorage.setting.put(SettingBoxKey.vodMultiConnThreads, res);
+    setState();
+  }
+}

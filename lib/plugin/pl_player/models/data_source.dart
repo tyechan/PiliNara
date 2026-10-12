@@ -15,7 +15,12 @@ class NetworkSource extends DataSource {
   NetworkSource({
     required super.videoSource,
     required super.audioSource,
+    this.videoCandidates = const [],
+    this.audioCandidates = const [],
   });
+
+  final List<String> videoCandidates;
+  final List<String> audioCandidates;
 }
 
 class FileSource extends DataSource {

@@ -1115,6 +1115,39 @@ abstract final class Pref {
   static bool get videoStallVerboseLog =>
       _setting.get(SettingBoxKey.videoStallVerboseLog, defaultValue: true);
 
+  static bool get vodMultiConnProxy =>
+      _setting.get(SettingBoxKey.vodMultiConnProxy, defaultValue: true);
+
+  static int get vodMultiConnThreads {
+    final raw = _setting.get(
+      SettingBoxKey.vodMultiConnThreads,
+      defaultValue: 6,
+    );
+    if (raw is int) return raw.clamp(1, 16);
+    if (raw is num) return raw.round().clamp(1, 16);
+    return 6;
+  }
+
+  static int get vodMultiConnWindowMb {
+    final raw = _setting.get(
+      SettingBoxKey.vodMultiConnWindowMb,
+      defaultValue: 32,
+    );
+    if (raw is int) return raw.clamp(8, 64);
+    if (raw is num) return raw.round().clamp(8, 64);
+    return 32;
+  }
+
+  static int get vodMultiConnChunkKb {
+    final raw = _setting.get(
+      SettingBoxKey.vodMultiConnChunkKb,
+      defaultValue: 512,
+    );
+    if (raw is int) return raw.clamp(256, 1024);
+    if (raw is num) return raw.round().clamp(256, 1024);
+    return 512;
+  }
+
   static bool get disableAudioCDN =>
       _setting.get(SettingBoxKey.disableAudioCDN, defaultValue: false);
 
@@ -1354,10 +1387,9 @@ abstract final class Pref {
       'demuxer-hysteresis-secs': (bufSec / 1.5).toStringAsFixed(3),
       'demuxer-max-bytes': bufSiz,
       'demuxer-max-back-bytes': bufSiz,
-      // Disable lavf HTTP reconnect/persistent reuse. A mid-stream range
-      // resume that returns the wrong bytes looks exactly like the 18:02
-      // NAL-size storm (video EOF, audio continues). Live keeps reconnect.
-      'stream-lavf-o': 'reconnect=0,reconnect_streamed=0,reconnect_on_network_error=0,http_persistent=0',
+      // media_kit extras split on commas, so lavf AVOptions use colons.
+      // This ffmpeg build only knows reconnect / http_persistent.
+      'stream-lavf-o': 'reconnect=0:http_persistent=0',
       'demuxer-lavf-o': 'fflags=+discardcorrupt',
     };
   }

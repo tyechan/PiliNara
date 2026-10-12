@@ -520,6 +520,8 @@ abstract final class VideoStallLog {
   static void cdnRotate({required String from, required String to}) =>
       _log('CDN_ROTATE from=$from to=$to');
 
+  static void proxy(String message) => _log('PROXY $message');
+
   static void surface({required int? from, required int? to}) {
     final kind = to == null ? 'SURFACE_INVALID' : 'SURFACE';
     _log('$kind textureId $from -> $to');

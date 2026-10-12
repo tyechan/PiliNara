@@ -33,6 +33,7 @@ import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/video_stall_monitor.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:PiliPlus/services/live_pip_overlay_service.dart';
 import 'package:PiliPlus/services/pip_overlay_service.dart';
 import 'package:PiliPlus/services/service_locator.dart';
@@ -1271,8 +1272,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         ...buffer,
     };
 
-    String video = dataSource.videoSource;
-    if (dataSource.audioSource case final audio? when (audio.isNotEmpty)) {
+    var playSource = dataSource;
+    if (!isLive &&
+        playSource is NetworkSource &&
+        Pref.vodMultiConnProxy &&
+        Platform.isAndroid) {
+      try {
+        final wrapped = await VodHttpProxy.instance.wrap(playSource);
+        if (wrapped != null) {
+          playSource = wrapped;
+        }
+      } catch (e) {
+        VideoStallLog.proxy('wrap-failed $e');
+      }
+    }
+
+    String video = playSource.videoSource;
+    if (playSource.audioSource case final audio? when (audio.isNotEmpty)) {
       if (onlyPlayAudio.value) {
         video = audio;
       } else {
@@ -1765,6 +1781,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   Future<void> _reopenWithRotatedCdn(NativePlayer player) async {
     final pos = player.state.position;
+    if (VodHttpProxy.instance.hasActiveSession &&
+        VodHttpProxy.instance.preferNextHost()) {
+      VideoStallLog.cdnRotate(
+        from: 'proxy',
+        to: VodHttpProxy.instance.preferredHost ?? '-',
+      );
+      await refreshPlayer();
+      return;
+    }
     if (_applyVideoCdnRotate()) {
       await _createVideoController(dataSource, pos, null);
       await _initializePlayer();
@@ -1792,6 +1817,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     dataSource = NetworkSource(
       videoSource: rotated,
       audioSource: src.audioSource,
+      videoCandidates: src.videoCandidates,
+      audioCandidates: src.audioCandidates,
     );
     return true;
   }

@@ -156,6 +156,8 @@ class VideoDetailController extends GetxController
   late VideoItem firstVideo;
   String? videoUrl;
   String? audioUrl;
+  List<String> videoPlayUrls = const [];
+  List<String> audioPlayUrls = const [];
   Duration? defaultST;
   Duration? playedTime;
   String playedTimePos(bool hasParams) {
@@ -417,8 +419,7 @@ class VideoDetailController extends GetxController
       final fsQa = isWiFi ? Pref.defaultVideoQa : Pref.defaultVideoQaCellular;
       final curHighestVideoQa = data.dash!.video!.first.quality.code;
       int targetQa = curHighestVideoQa;
-      if (data.acceptQuality?.isNotEmpty == true &&
-          fsQa <= curHighestVideoQa) {
+      if (data.acceptQuality?.isNotEmpty == true && fsQa <= curHighestVideoQa) {
         targetQa = data.acceptQuality!.findClosestTarget(
           (e) => e <= fsQa,
           (a, b) => a > b ? a : b,
@@ -905,6 +906,7 @@ class VideoDetailController extends GetxController
       ..buffered.value = 0;
 
     firstVideo = findVideoByQa(currentVideoQa.code, setCodecs: true);
+    videoPlayUrls = firstVideo.playUrls.toList();
     videoUrl = VideoUtils.getCdnUrl(firstVideo.playUrls);
 
     /// 根据currentAudioQa 重新设置audioUrl
@@ -913,6 +915,7 @@ class VideoDetailController extends GetxController
         (i) => i.id == currentAudioQa!.code,
         orElse: () => data.dash!.audio!.first,
       );
+      audioPlayUrls = firstAudio.playUrls.toList();
       audioUrl = VideoUtils.getCdnUrl(firstAudio.playUrls, isAudio: true);
     }
 
@@ -957,6 +960,8 @@ class VideoDetailController extends GetxController
           : NetworkSource(
               videoSource: videoUrl!,
               audioSource: audioUrl,
+              videoCandidates: videoPlayUrls,
+              audioCandidates: audioPlayUrls,
             ),
       seekTo: seek,
       duration: data.timeLength == null
@@ -986,7 +991,9 @@ class VideoDetailController extends GetxController
     // 触发不必要的异步操作和 UI 更新
     if (isClosed) {
       if (kDebugMode) {
-        debugPrint('[VideoDetail] playerInit: controller is closed, skipping resource loading');
+        debugPrint(
+          '[VideoDetail] playerInit: controller is closed, skipping resource loading',
+        );
       }
       return;
     }
@@ -1070,17 +1077,17 @@ class VideoDetailController extends GetxController
     }
     isQuerying = true;
     try {
-    if (_lastQueryBvid != bvid || _lastQueryCid != cid.value) {
-      // 跨视频/分P时重置画质缓存，确保根据半屏/全屏设置重新选择默认画质。
-      // resetTempSettings 在 setDataSource 中执行（HTTP 请求之后），
-      // 此处提前重置使得 cacheVideoQa == null 分支能正确初始化。
-      if (PlatformUtils.isMobile) {
-        plPlayerController.cacheVideoQa = null;
+      if (_lastQueryBvid != bvid || _lastQueryCid != cid.value) {
+        // 跨视频/分P时重置画质缓存，确保根据半屏/全屏设置重新选择默认画质。
+        // resetTempSettings 在 setDataSource 中执行（HTTP 请求之后），
+        // 此处提前重置使得 cacheVideoQa == null 分支能正确初始化。
+        if (PlatformUtils.isMobile) {
+          plPlayerController.cacheVideoQa = null;
+        }
+        _lastQueryBvid = bvid;
+        _lastQueryCid = cid.value;
       }
-      _lastQueryBvid = bvid;
-      _lastQueryCid = cid.value;
-    }
-    await _queryVideoUrl(fromReset, autoFullScreenFlag, reinitializePlayer);
+      await _queryVideoUrl(fromReset, autoFullScreenFlag, reinitializePlayer);
     } finally {
       isQuerying = false;
     }
@@ -1101,8 +1108,8 @@ class VideoDetailController extends GetxController
       final halfScreenQa = Pref.defaultVideoQaHalfScreen;
       plPlayerController
         // 半屏与蜂窝是两个正交的画质上限，同时命中取较低者（docs/adr/0002）
-        ..cacheVideoQa = !plPlayerController.isFullScreen.value &&
-                halfScreenQa != null
+        ..cacheVideoQa =
+            !plPlayerController.isFullScreen.value && halfScreenQa != null
             ? min(halfScreenQa, fsQa)
             : fsQa
         ..cacheAudioQa = isWiFi
@@ -1162,10 +1169,12 @@ class VideoDetailController extends GetxController
             }
             videoUrl = sb.toString();
           } else {
+            videoPlayUrls = durl.single.playUrls.toList();
             videoUrl = VideoUtils.getCdnUrl(durl.single.playUrls);
           }
 
           audioUrl = '';
+          audioPlayUrls = const [];
 
           // 实际为FLV/MP4格式，但已被淘汰，这里仅做兜底处理
           final videoQuality = VideoQuality.fromCode(data.quality!);
@@ -1232,6 +1241,7 @@ class VideoDetailController extends GetxController
       );
       _setVideoHeight();
 
+      videoPlayUrls = firstVideo.playUrls.toList();
       videoUrl = VideoUtils.getCdnUrl(firstVideo.playUrls);
 
       /// 优先顺序 设置中指定质量 -> 当前可选的最高质量
@@ -1251,10 +1261,12 @@ class VideoDetailController extends GetxController
           (e) => e.id == closestNumber,
           orElse: () => audioList.first,
         );
+        audioPlayUrls = firstAudio.playUrls.toList();
         audioUrl = VideoUtils.getCdnUrl(firstAudio.playUrls, isAudio: true);
         currentAudioQa = AudioQuality.fromCode(firstAudio.id);
       } else {
         audioUrl = '';
+        audioPlayUrls = const [];
       }
       if (reinitializePlayer) {
         await initPlayerIfNeeded(autoFullScreenFlag);

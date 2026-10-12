@@ -172,6 +172,52 @@ abstract final class VideoUtils {
 
   /// Replace the media host, keeping scheme/path/query (signed URLs).
   /// Unknown hosts (including cosov) jump to the first fallback.
+  /// Mainland hosts used by the VOD multi-connection proxy. `cosov` is left
+  /// as an original/backup candidate only — it is not injected here.
+  static const proxyMainlandHosts = [
+    'upos-sz-mirrorali.bilivideo.com',
+    'upos-sz-mirrorhw.bilivideo.com',
+    'upos-sz-mirrorcos.bilivideo.com',
+    'upos-sz-mirroralib.bilivideo.com',
+    'upos-sz-mirrorhwb.bilivideo.com',
+  ];
+
+  /// Unique host-rewritten URLs: original + extras + user CDN + mainland list.
+  static List<String> candidateMediaUrls(
+    String primary, {
+    Iterable<String> extras = const [],
+  }) {
+    final seen = <String>{};
+    final out = <String>[];
+
+    void add(String url) {
+      final uri = Uri.tryParse(url);
+      if (uri == null || uri.host.isEmpty) return;
+      if (!_isReplaceableMediaHost(uri.host)) return;
+      final host = uri.host.toLowerCase();
+      if (!seen.add(host)) return;
+      out.add(uri.replace(host: host).toString());
+    }
+
+    add(primary);
+    for (final extra in extras) {
+      add(extra);
+    }
+    final base = Uri.tryParse(primary);
+    if (base != null && _isReplaceableMediaHost(base.host)) {
+      try {
+        final custom = customCDNUrl;
+        if (custom != null) {
+          add(base.replace(host: custom).toString());
+        }
+      } catch (_) {}
+      for (final host in proxyMainlandHosts) {
+        add(base.replace(host: host).toString());
+      }
+    }
+    return out;
+  }
+
   static String rotateMediaHost(String url) {
     final uri = Uri.tryParse(url);
     if (uri == null || uri.host.isEmpty || !_isReplaceableMediaHost(uri.host)) {
