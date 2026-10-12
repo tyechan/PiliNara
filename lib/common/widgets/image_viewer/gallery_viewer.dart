@@ -625,7 +625,7 @@ class _GalleryViewerState extends State<GalleryViewer>
       context: context,
       position: PageUtils.menuPosition(details.globalPosition),
       clipBehavior: Clip.antiAlias,
-      items: [
+      items: <PopupMenuEntry<void>>[
         CustomPopupMenuItem<void>(
           height: 42,
           onTap: () => ImageUtils.downloadImg([item.url]),

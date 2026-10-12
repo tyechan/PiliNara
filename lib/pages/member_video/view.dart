@@ -125,7 +125,7 @@ class _MemberVideoState extends State<MemberVideo>
         if (_controller.hasPrev == true && !_controller.isLoading) {
           _controller
             ..isLoadPrevious = true
-            ..refreshKey!.currentState?.show();
+            ..refreshKey.currentState?.show();
         }
       }
       return true;

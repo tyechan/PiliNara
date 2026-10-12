@@ -337,6 +337,18 @@ class MineController extends GetxController with AccountMixin {
     );
   }
 
+  void toTopOrRefresh() {
+    for (final ctr in tabCtr()) {
+      ctr.toTopOrRefresh();
+    }
+  }
+
+  void toTopAndRefresh() {
+    for (final ctr in tabCtr()) {
+      ctr.toTopAndRefresh();
+    }
+  }
+
   @override
   void onChangeAccount(bool isLogin) {
     if (isLogin) {

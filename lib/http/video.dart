@@ -87,7 +87,7 @@ abstract final class VideoHttp {
     }
   }
 
-  static bool _filterWebRcmd(dynamic i, int mid) {
+  static bool _filterWebRcmd(dynamic i, int? mid) {
     if (i['goto'] != 'av') return true;
     if (i['owner'] != null &&
         GlobalData().blackMids.contains(i['owner']['mid']) &&

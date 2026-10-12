@@ -112,7 +112,7 @@ class _SuperChatCardState extends State<SuperChatCard> {
       context: context,
       position: PageUtils.menuPosition(offset),
       clipBehavior: Clip.antiAlias,
-      items: [
+      items: <PopupMenuEntry<void>>[
         CustomPopupMenuItem<void>(
           height: 38,
           onTap: () => Get.toNamed('/member?mid=${item.uid}'),

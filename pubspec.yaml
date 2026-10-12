@@ -74,7 +74,7 @@ dependencies:
   connectivity_plus: ^7.1.1
   cookie_jar: ^4.0.8
   crypto: ^3.0.6
-  cupertino_ui: ^1.0.0
+  cupertino_ui: 1.1.2
   device_info_plus: ^13.1.0
   dio: ^5.9.1
   dio_http2_adapter: ^2.7.1
@@ -136,7 +136,7 @@ dependencies:
       url: https://github.com/bggRGjQaUbCoE/material_design_icons_flutter.git
       ref: const
   material_new_shapes: ^1.0.0
-  material_ui: ^1.0.0
+  material_ui: 1.6.0
   media_kit: 1.1.11
   media_kit_libs_video: 1.0.5
   media_kit_video: 1.2.5
@@ -152,7 +152,7 @@ dependencies:
   permission_handler_apple: ^9.4.7
   permission_handler_platform_interface: ^4.3.0
   pretty_qr_code: ^3.3.0
-  protobuf: ^6.0.0
+  protobuf: 6.1.0
   re_highlight: ^0.0.3
   saver_gallery: ^5.0.2
   screen_brightness_platform_interface: ^2.1.0

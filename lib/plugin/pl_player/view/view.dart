@@ -1573,7 +1573,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
         ),
         onLongPress: (Platform.isAndroid || kDebugMode) &&
                 !plPlayerController.isLive
-            ? screenshotWebp
+            ? _screenshotWebp
             : null,
         onTap: plPlayerController.takeScreenshot,
       ),
