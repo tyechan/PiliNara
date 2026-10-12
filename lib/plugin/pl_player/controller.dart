@@ -1613,8 +1613,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (text.contains('Error while decoding frame') ||
         text.contains('Too many packets in the demuxer') ||
         text.contains('Invalid NAL unit size') ||
-        text.contains('missing picture in access unit')) {
+        text.contains('missing picture in access unit') ||
+        text.contains('Error splitting the input into NAL units')) {
       _videoStallMonitor.noteDecoderFault();
+    }
+    // `EOF code: 4` also fires on stop/loadfile. Only the video-track EOF
+    // (and vf filter input EOF) means the picture died while audio continues.
+    final prefix = log.prefix.toLowerCase();
+    if (text.contains('video EOF (status=') ||
+        (prefix.startsWith('vf') && text.contains('filter input EOF'))) {
+      _videoStallMonitor.noteVideoEof();
     }
     if (text.contains('Using software decoding') ||
         text.contains('Attempting next decoding method')) {
@@ -1672,6 +1680,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       decoderFaultCount: _videoStallMonitor.takeDecoderFaults(),
       autoRecover: Pref.videoStallAutoRecover,
       verboseLog: Pref.videoStallVerboseLog,
+      estimatedFrameNumber:
+          asInt('frame-number') ?? asInt('estimated-frame-number'),
+      durationSec:
+          asDouble('duration') ??
+          (state.duration > Duration.zero
+              ? state.duration.inMilliseconds / 1000.0
+              : null),
+      videoEof: _videoStallMonitor.videoEofSticky,
+      faultWindow: _videoStallMonitor.decoderFaultWindow,
     );
   }
 
@@ -1717,6 +1734,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   ) async {
     if (_videoStallRecovering || _playerCount == 0) return;
     _videoStallRecovering = true;
+    _videoStallMonitor.clearAfterRecovery();
     VideoStallLog.recovery(action, snap);
     try {
       switch (action) {
@@ -1728,7 +1746,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           } catch (_) {}
           await player.seek(player.state.position);
         case VideoStallRecoveryAction.reopen:
-          await refreshPlayer();
+          if (onNeedsPlayerInit != null) {
+            await onNeedsPlayerInit!();
+          } else {
+            await refreshPlayer();
+          }
+        case VideoStallRecoveryAction.reopenFreshUrl:
+          await _reopenWithRotatedCdn(player);
       }
     } catch (e) {
       if (kDebugMode) {
@@ -1737,6 +1761,39 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     } finally {
       _videoStallRecovering = false;
     }
+  }
+
+  Future<void> _reopenWithRotatedCdn(NativePlayer player) async {
+    final pos = player.state.position;
+    if (_applyVideoCdnRotate()) {
+      await _createVideoController(dataSource, pos, null);
+      await _initializePlayer();
+      return;
+    }
+    if (onNeedsPlayerInit != null) {
+      await onNeedsPlayerInit!();
+      return;
+    }
+    await refreshPlayer();
+  }
+
+  bool _applyVideoCdnRotate() {
+    final src = dataSource;
+    if (src is! NetworkSource) return false;
+    final rotated = VideoUtils.rotateMediaHost(src.videoSource);
+    if (rotated == src.videoSource) return false;
+    String fromHost = src.videoSource;
+    String toHost = rotated;
+    try {
+      fromHost = Uri.parse(src.videoSource).host;
+      toHost = Uri.parse(rotated).host;
+    } catch (_) {}
+    VideoStallLog.cdnRotate(from: fromHost, to: toHost);
+    dataSource = NetworkSource(
+      videoSource: rotated,
+      audioSource: src.audioSource,
+    );
+    return true;
   }
 
   void _cancelSubForSeek() {

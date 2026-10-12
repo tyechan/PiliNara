@@ -36,6 +36,14 @@ const int kVideoStallHeartbeatEvery = 5;
 /// Decoder/NAL errors in one poll interval that count as a frozen tick.
 const int kVideoStallDecoderFaultThreshold = 8;
 
+/// Keep a NAL/decode burst "hot" for this many later polls. The 18:02:48
+/// storm lasted <100ms, so a 1 Hz snapshot otherwise sees decoderFaults=0
+/// on the next TICK and resets stuckTicks.
+const int kVideoStallDecoderFaultStickyTicks = 3;
+
+/// Don't treat video EOF as a stall when we are this close to duration.
+const double kVideoStallNearEndSec = 2.0;
+
 enum VideoStallRecoveryAction {
   /// Flush the decoder by seeking to the current position.
   seekFlush,
@@ -43,14 +51,19 @@ enum VideoStallRecoveryAction {
   /// Switch zero-copy MediaCodec to copy-back, then seek to reinit.
   switchToCopyHwdec,
 
-  /// Re-open the current media (live or last-resort VOD).
+  /// Re-open the current media at the current position (same URL).
   reopen,
+
+  /// Re-open with a different CDN host (same path/query).
+  reopenFreshUrl,
 }
 
 enum VideoStallReason {
   videoPtsFrozen,
   vfFpsCollapsed,
   decoderFaults,
+  videoEof,
+  framesStopped,
 }
 
 @immutable
@@ -96,6 +109,10 @@ class VideoStallSnapshot {
     this.decoderFaultCount = 0,
     this.autoRecover = true,
     this.verboseLog = true,
+    this.estimatedFrameNumber,
+    this.durationSec,
+    this.videoEof = false,
+    this.faultWindow = 0,
   });
 
   final PlayerStatus playerStatus;
@@ -138,6 +155,17 @@ class VideoStallSnapshot {
   final int decoderFaultCount;
   final bool autoRecover;
   final bool verboseLog;
+  final int? estimatedFrameNumber;
+  final double? durationSec;
+  final bool videoEof;
+  final int faultWindow;
+
+  bool get nearEnd {
+    final pos = timePos;
+    final dur = durationSec;
+    if (pos == null || dur == null || dur <= 1) return false;
+    return dur - pos <= kVideoStallNearEndSec;
+  }
 
   /// Audio/playback clock: prefer audio PTS, fall back to time-pos.
   double? get clockPts => audioPts ?? timePos;
@@ -193,7 +221,9 @@ class VideoStallSnapshot {
         'vfFps=${_fmt(estimatedVfFps)} avsync=$avsync '
         'frameDrop=$dropFrameCount decoderDrop=$decoderFrameDropCount '
         'voDrop=$voDropFrameCount delayed=$voDelayedFrameCount '
-        'decoderFaults=$decoderFaultCount bitrate=$videoBitrate '
+        'decoderFaults=$decoderFaultCount faultWindow=$faultWindow '
+        'videoEof=$videoEof frameNo=$estimatedFrameNumber '
+        'duration=${_fmt(durationSec)} bitrate=$videoBitrate '
         'hwdecRequested=$hwdec hwdecCurrent=$hwdecCurrent vo=$vo '
         'codec=$codecFamily format=$videoFormat '
         'vcodec=$videoCodec acodec=$audioCodec vid=$vid '
@@ -249,6 +279,8 @@ class VideoStallMonitor {
   int watchTicks = 0;
   int pendingDecoderFaults = 0;
   bool everArmed = false;
+  int decoderFaultWindow = 0;
+  bool videoEofSticky = false;
 
   void resetForNewMedia() {
     stuckTicks = 0;
@@ -259,10 +291,26 @@ class VideoStallMonitor {
     watchTicks = 0;
     pendingDecoderFaults = 0;
     everArmed = false;
+    decoderFaultWindow = 0;
+    videoEofSticky = false;
+  }
+
+  /// After a recovery attempt, drop the current freeze signals so the next
+  /// media open is not immediately treated as still stalled.
+  void clearAfterRecovery() {
+    stuckTicks = 0;
+    previous = null;
+    pendingDecoderFaults = 0;
+    decoderFaultWindow = 0;
+    videoEofSticky = false;
   }
 
   void noteDecoderFault() {
     pendingDecoderFaults++;
+  }
+
+  void noteVideoEof() {
+    videoEofSticky = true;
   }
 
   int takeDecoderFaults() {
@@ -333,8 +381,31 @@ class VideoStallMonitor {
         snap.videoPts == null) {
       reasons.add(VideoStallReason.vfFpsCollapsed);
     }
-    if (snap.decoderUnhappy && clockAdvanced) {
+    // A NAL/decode burst is usually <100ms. takeDecoderFaults() zeros the
+    // count every 1 Hz poll, so keep the burst hot for a few later ticks.
+    if (snap.decoderFaultCount >= kVideoStallDecoderFaultThreshold) {
+      decoderFaultWindow = kVideoStallDecoderFaultStickyTicks;
+    }
+    if ((snap.decoderUnhappy || decoderFaultWindow > 0) && clockAdvanced) {
       reasons.add(VideoStallReason.decoderFaults);
+    }
+    if (decoderFaultWindow > 0) {
+      decoderFaultWindow--;
+    }
+    // Video track died (EOF/error) while audio/time-pos still moves, and
+    // we are not at the real end of the file.
+    if ((videoEofSticky || snap.videoEof) && clockAdvanced && !snap.nearEnd) {
+      reasons.add(VideoStallReason.videoEof);
+    }
+    // Prefer a presented-frame counter. estimated-frame-number may track
+    // time-pos (container fps) and then never fire — that is OK.
+    if (everArmed &&
+        clockAdvanced &&
+        prev.estimatedFrameNumber != null &&
+        snap.estimatedFrameNumber != null &&
+        prev.estimatedFrameNumber! > 0 &&
+        snap.estimatedFrameNumber == prev.estimatedFrameNumber) {
+      reasons.add(VideoStallReason.framesStopped);
     }
 
     if (reasons.isNotEmpty) {
@@ -360,7 +431,7 @@ class VideoStallMonitor {
       recoveries++;
       lastRecoveryAt = timestamp;
       stuckTicks = 0;
-      action = pickRecoveryAction(snap, recoveries);
+      action = pickRecoveryAction(snap, recoveries, reasons);
     }
 
     return VideoStallObserveResult(
@@ -375,10 +446,19 @@ class VideoStallMonitor {
 
   static VideoStallRecoveryAction pickRecoveryAction(
     VideoStallSnapshot snap,
-    int recoveryNumber,
-  ) {
+    int recoveryNumber, [
+    List<VideoStallReason> reasons = const [],
+  ]) {
     if (snap.isLive) {
       return VideoStallRecoveryAction.reopen;
+    }
+    // Seeking a demuxer that already lost NAL sync produced the bogus
+    // 923MB "stream level seek" in the 18:02 capture. Reopen instead.
+    final streamDied = reasons.any(_isStreamDeathReason);
+    if (streamDied) {
+      return recoveryNumber <= 1
+          ? VideoStallRecoveryAction.reopenFreshUrl
+          : VideoStallRecoveryAction.reopen;
     }
     if (recoveryNumber <= 1) {
       return VideoStallRecoveryAction.seekFlush;
@@ -387,6 +467,12 @@ class VideoStallMonitor {
       return VideoStallRecoveryAction.switchToCopyHwdec;
     }
     return VideoStallRecoveryAction.reopen;
+  }
+
+  static bool _isStreamDeathReason(VideoStallReason reason) {
+    return reason == VideoStallReason.videoEof ||
+        reason == VideoStallReason.decoderFaults ||
+        reason == VideoStallReason.framesStopped;
   }
 
   static bool _advanced(double? prev, double? curr) {
@@ -430,6 +516,9 @@ abstract final class VideoStallLog {
       _log('STALL_NO_RECOVERY autoRecover=off ${snap.toLogLine()}');
 
   static void hwdecFallback(String detail) => _log('HWDEC_FALLBACK $detail');
+
+  static void cdnRotate({required String from, required String to}) =>
+      _log('CDN_ROTATE from=$from to=$to');
 
   static void surface({required int? from, required int? to}) {
     final kind = to == null ? 'SURFACE_INVALID' : 'SURFACE';

@@ -219,7 +219,7 @@ List<SettingsModel> get videoSettings => [
   ),
   const SwitchModel(
     title: '画面冻结自动恢复',
-    subtitle: '检测到有声无画时自动 seek / 切硬解 / 重开。抓「纯冻结」日志时请关掉',
+    subtitle: '检测到有声无画、视频轨 EOF 或 NAL 损坏时自动重开（可换 CDN）。抓「纯冻结」日志时请关掉',
     leading: Icon(Icons.healing_outlined),
     setKey: SettingBoxKey.videoStallAutoRecover,
     defaultVal: true,

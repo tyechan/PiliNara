@@ -1354,6 +1354,11 @@ abstract final class Pref {
       'demuxer-hysteresis-secs': (bufSec / 1.5).toStringAsFixed(3),
       'demuxer-max-bytes': bufSiz,
       'demuxer-max-back-bytes': bufSiz,
+      // Disable lavf HTTP reconnect/persistent reuse. A mid-stream range
+      // resume that returns the wrong bytes looks exactly like the 18:02
+      // NAL-size storm (video EOF, audio continues). Live keeps reconnect.
+      'stream-lavf-o': 'reconnect=0,reconnect_streamed=0,reconnect_on_network_error=0,http_persistent=0',
+      'demuxer-lavf-o': 'fflags=+discardcorrupt',
     };
   }
 
@@ -1424,8 +1429,10 @@ abstract final class Pref {
   static bool get continuePlayInBackground =>
       _setting.get(SettingBoxKey.continuePlayInBackground, defaultValue: false);
 
-  static bool get autoAudioOnlyInBackground =>
-      _setting.get(SettingBoxKey.autoAudioOnlyInBackground, defaultValue: false);
+  static bool get autoAudioOnlyInBackground => _setting.get(
+    SettingBoxKey.autoAudioOnlyInBackground,
+    defaultValue: false,
+  );
 
   static bool get directExitOnBack =>
       _setting.get(SettingBoxKey.directExitOnBack, defaultValue: false);
@@ -1661,8 +1668,7 @@ abstract final class Pref {
   static int get videoSaturation =>
       _videoPictureParameter(SettingBoxKey.videoSaturation);
 
-  static int get videoGamma =>
-      _videoPictureParameter(SettingBoxKey.videoGamma);
+  static int get videoGamma => _videoPictureParameter(SettingBoxKey.videoGamma);
 
   static int get videoHue => _videoPictureParameter(SettingBoxKey.videoHue);
 
@@ -1687,13 +1693,12 @@ abstract final class Pref {
   );
 
   /// 已导入字体的显示名：字体族名 → 从字体文件解析出的名字
-  static Map<String, String> get customAppFontNames =>
-      Map<String, String>.from(
-        _setting.get(
-          SettingBoxKey.customAppFontNames,
-          defaultValue: const <String, String>{},
-        ),
-      );
+  static Map<String, String> get customAppFontNames => Map<String, String>.from(
+    _setting.get(
+      SettingBoxKey.customAppFontNames,
+      defaultValue: const <String, String>{},
+    ),
+  );
 
   static bool get enableEmoteTooltip =>
       _setting.get(SettingBoxKey.enableEmoteTooltip, defaultValue: false);

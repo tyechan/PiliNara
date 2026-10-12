@@ -160,6 +160,32 @@ abstract final class VideoUtils {
           ).toString();
   }
 
+  /// Hosts to try when the current video CDN appears to serve a corrupt
+  /// byte stream. `mirrorcosov` is omitted on purpose: both S26 Ultra
+  /// freezes used it for the VIDEO m4s.
+  static const rotateFallbackHosts = [
+    'upos-sz-mirrorali.bilivideo.com',
+    'upos-sz-mirrorhw.bilivideo.com',
+    'upos-hz-mirrorakam.akamaized.net',
+    'upos-sz-mirrorcos.bilivideo.com',
+  ];
+
+  /// Replace the media host, keeping scheme/path/query (signed URLs).
+  /// Unknown hosts (including cosov) jump to the first fallback.
+  static String rotateMediaHost(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty || !_isReplaceableMediaHost(uri.host)) {
+      return url;
+    }
+    final current = uri.host.toLowerCase();
+    final idx = rotateFallbackHosts.indexWhere((h) => h == current);
+    final next = rotateFallbackHosts[(idx + 1) % rotateFallbackHosts.length];
+    if (next == current) {
+      return url;
+    }
+    return uri.replace(host: next).toString();
+  }
+
   static String getLiveCdnUrl(CodecItem e, {int index = 0}) {
     final urlInfo = e.urlInfo.getOrFirst(index);
     return (liveCdnUrl ?? urlInfo.host) + e.baseUrl + urlInfo.extra;

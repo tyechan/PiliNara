@@ -17,6 +17,9 @@ VideoStallSnapshot _snap({
   String hwdecCurrent = 'mediacodec',
   String vid = '1',
   String pausedForCache = 'no',
+  int? estimatedFrameNumber,
+  double? durationSec,
+  bool videoEof = false,
 }) {
   return VideoStallSnapshot(
     playerStatus: status,
@@ -47,6 +50,9 @@ VideoStallSnapshot _snap({
     width: 1920,
     height: 1080,
     decoderFaultCount: decoderFaultCount,
+    estimatedFrameNumber: estimatedFrameNumber,
+    durationSec: durationSec,
+    videoEof: videoEof,
   );
 }
 
@@ -283,6 +289,7 @@ void main() {
     }
     expect(last!.isStalled, isTrue);
     expect(last.reasons, contains(VideoStallReason.decoderFaults));
+    expect(last.recovery, VideoStallRecoveryAction.reopenFreshUrl);
   });
 
   test('PAUSE is logged when playback leaves the watch state', () {
@@ -395,5 +402,177 @@ void main() {
     expect(_snap().toLogLine(), contains('codec=avc'));
     expect(_snap().toLogLine(), contains('reusedPlayer=false'));
     expect(_snap().toLogLine(), contains('scene=foreground'));
+  });
+
+  test('NAL burst stays sticky after takeDecoderFaults would read 0', () {
+    final monitor = VideoStallMonitor(now: () => DateTime(2026, 10, 12));
+    monitor.observe(
+      _snap(timePos: 24, videoPts: null, audioPts: 24, estimatedVfFps: 29.97),
+    );
+
+    var last = monitor.observe(
+      _snap(
+        timePos: 25,
+        videoPts: null,
+        audioPts: 25,
+        estimatedVfFps: 29.97,
+        decoderFaultCount: kVideoStallDecoderFaultThreshold,
+      ),
+    );
+    expect(last.isStalled, isFalse);
+    expect(monitor.stuckTicks, 1);
+
+    for (var i = 2; i <= kVideoStallTickThreshold; i++) {
+      last = monitor.observe(
+        _snap(
+          timePos: 24.0 + i,
+          videoPts: null,
+          audioPts: 24.0 + i,
+          estimatedVfFps: 29.97,
+        ),
+      );
+    }
+    expect(last.isStalled, isTrue);
+    expect(last.reasons, contains(VideoStallReason.decoderFaults));
+    expect(last.recovery, VideoStallRecoveryAction.reopenFreshUrl);
+  });
+
+  test('video EOF while audio continues mid-file reopens with a fresh URL', () {
+    final monitor = VideoStallMonitor(now: () => DateTime(2026, 10, 12));
+    monitor.observe(
+      _snap(
+        timePos: 40,
+        videoPts: null,
+        audioPts: 40,
+        estimatedVfFps: 29.97,
+        durationSec: 200,
+      ),
+    );
+    VideoStallObserveResult? last;
+    for (var i = 1; i <= kVideoStallTickThreshold; i++) {
+      last = monitor.observe(
+        _snap(
+          timePos: 40.0 + i,
+          videoPts: null,
+          audioPts: 40.0 + i,
+          estimatedVfFps: 29.97,
+          durationSec: 200,
+          videoEof: true,
+        ),
+      );
+    }
+    expect(last!.isStalled, isTrue);
+    expect(last.reasons, contains(VideoStallReason.videoEof));
+    expect(last.recovery, VideoStallRecoveryAction.reopenFreshUrl);
+  });
+
+  test('noteVideoEof is enough even if the snapshot flag is still false', () {
+    final monitor = VideoStallMonitor(now: () => DateTime(2026, 10, 12));
+    monitor.observe(
+      _snap(
+        timePos: 40,
+        videoPts: null,
+        audioPts: 40,
+        estimatedVfFps: 29.97,
+        durationSec: 200,
+      ),
+    );
+    monitor.noteVideoEof();
+    VideoStallObserveResult? last;
+    for (var i = 1; i <= kVideoStallTickThreshold; i++) {
+      last = monitor.observe(
+        _snap(
+          timePos: 40.0 + i,
+          videoPts: null,
+          audioPts: 40.0 + i,
+          estimatedVfFps: 29.97,
+          durationSec: 200,
+        ),
+      );
+    }
+    expect(last!.isStalled, isTrue);
+    expect(last.reasons, contains(VideoStallReason.videoEof));
+  });
+
+  test('video EOF near the real end is not a stall', () {
+    final monitor = VideoStallMonitor();
+    monitor.observe(
+      _snap(
+        timePos: 198,
+        videoPts: null,
+        audioPts: 198,
+        estimatedVfFps: 29.97,
+        durationSec: 200,
+      ),
+    );
+    for (var i = 1; i <= kVideoStallTickThreshold + 1; i++) {
+      final result = monitor.observe(
+        _snap(
+          timePos: 198.0 + i * 0.4,
+          videoPts: null,
+          audioPts: 198.0 + i * 0.4,
+          estimatedVfFps: 29.97,
+          durationSec: 200,
+          videoEof: true,
+        ),
+      );
+      expect(result.isStalled, isFalse, reason: 'tick $i');
+    }
+  });
+
+  test('frame number stuck while clock moves is a stall', () {
+    final monitor = VideoStallMonitor(now: () => DateTime(2026, 10, 12));
+    monitor.observe(
+      _snap(
+        timePos: 10,
+        videoPts: null,
+        audioPts: 10,
+        estimatedVfFps: 29.97,
+        estimatedFrameNumber: 300,
+      ),
+    );
+    VideoStallObserveResult? last;
+    for (var i = 1; i <= kVideoStallTickThreshold; i++) {
+      last = monitor.observe(
+        _snap(
+          timePos: 10.0 + i,
+          videoPts: null,
+          audioPts: 10.0 + i,
+          estimatedVfFps: 29.97,
+          estimatedFrameNumber: 300,
+        ),
+      );
+    }
+    expect(last!.isStalled, isTrue);
+    expect(last.reasons, contains(VideoStallReason.framesStopped));
+    expect(last.recovery, VideoStallRecoveryAction.reopenFreshUrl);
+  });
+
+  test('second stream-death recovery falls back to reopen', () {
+    expect(
+      VideoStallMonitor.pickRecoveryAction(
+        _snap(),
+        2,
+        const [VideoStallReason.videoEof],
+      ),
+      VideoStallRecoveryAction.reopen,
+    );
+    expect(
+      VideoStallMonitor.pickRecoveryAction(
+        _snap(),
+        1,
+        const [VideoStallReason.decoderFaults],
+      ),
+      VideoStallRecoveryAction.reopenFreshUrl,
+    );
+  });
+
+  test('resetForNewMedia clears eof sticky and decoder window', () {
+    final monitor = VideoStallMonitor();
+    monitor.noteVideoEof();
+    monitor.decoderFaultWindow = 2;
+    monitor.resetForNewMedia();
+    expect(monitor.videoEofSticky, isFalse);
+    expect(monitor.decoderFaultWindow, 0);
   });
 }
