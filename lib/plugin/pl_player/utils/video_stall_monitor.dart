@@ -25,6 +25,17 @@ const Duration kVideoStallRecoveryCooldown = Duration(seconds: 5);
 
 const double kVideoStallPtsEpsilon = 0.05;
 
+/// mpv `estimated-vf-fps` below this while the clock is moving counts as
+/// "no video frames flowing". 1.0 is well under any real container fps.
+const double kVideoStallVfFpsFloor = 1.0;
+
+/// Heartbeat every N watch polls so a freeze window is visible even if STALL
+/// does not fire. 5s at 1 Hz.
+const int kVideoStallHeartbeatEvery = 5;
+
+/// Decoder/NAL errors in one poll interval that count as a frozen tick.
+const int kVideoStallDecoderFaultThreshold = 8;
+
 enum VideoStallRecoveryAction {
   /// Flush the decoder by seeking to the current position.
   seekFlush,
@@ -34,6 +45,12 @@ enum VideoStallRecoveryAction {
 
   /// Re-open the current media (live or last-resort VOD).
   reopen,
+}
+
+enum VideoStallReason {
+  videoPtsFrozen,
+  vfFpsCollapsed,
+  decoderFaults,
 }
 
 @immutable
@@ -74,6 +91,11 @@ class VideoStallSnapshot {
     this.playerReused = false,
     this.mediaPath = '',
     this.appScene = 'foreground',
+    this.avsync = '',
+    this.videoBitrate = '',
+    this.decoderFaultCount = 0,
+    this.autoRecover = true,
+    this.verboseLog = true,
   });
 
   final PlayerStatus playerStatus;
@@ -111,6 +133,11 @@ class VideoStallSnapshot {
   final bool playerReused;
   final String mediaPath;
   final String appScene;
+  final String avsync;
+  final String videoBitrate;
+  final int decoderFaultCount;
+  final bool autoRecover;
+  final bool verboseLog;
 
   /// Audio/playback clock: prefer audio PTS, fall back to time-pos.
   double? get clockPts => audioPts ?? timePos;
@@ -126,6 +153,18 @@ class VideoStallSnapshot {
       hasVideoTrack &&
       pausedForCache != 'yes' &&
       pausedForCache != 'true';
+
+  /// A sample we can actually use: mpv `video-pts` is often unavailable with
+  /// `vo=gpu` + mediacodec-copy, so arm on estimated filter fps instead.
+  bool get isArmed =>
+      videoPts != null ||
+      (estimatedVfFps != null && estimatedVfFps! >= kVideoStallVfFpsFloor);
+
+  bool get vfFpsCollapsed =>
+      estimatedVfFps != null && estimatedVfFps! < kVideoStallVfFpsFloor;
+
+  bool get decoderUnhappy =>
+      decoderFaultCount >= kVideoStallDecoderFaultThreshold;
 
   String get codecFamily {
     final raw = '${videoCodec.toLowerCase()} ${videoFormat.toLowerCase()}';
@@ -148,11 +187,13 @@ class VideoStallSnapshot {
     return 'playing=$playing status=${playerStatus.name} '
         'buffering=$isBuffering seeking=$isSeeking audioOnly=$onlyPlayAudio '
         'live=$isLive scene=$appScene reusedPlayer=$playerReused '
+        'armed=$isArmed autoRecover=$autoRecover verbose=$verboseLog '
         'timePos=${_fmt(timePos)} videoPts=${_fmt(videoPts)} '
         'audioPts=${_fmt(audioPts)} fps=${_fmt(containerFps)} '
-        'vfFps=${_fmt(estimatedVfFps)} '
+        'vfFps=${_fmt(estimatedVfFps)} avsync=$avsync '
         'frameDrop=$dropFrameCount decoderDrop=$decoderFrameDropCount '
         'voDrop=$voDropFrameCount delayed=$voDelayedFrameCount '
+        'decoderFaults=$decoderFaultCount bitrate=$videoBitrate '
         'hwdecRequested=$hwdec hwdecCurrent=$hwdecCurrent vo=$vo '
         'codec=$codecFamily format=$videoFormat '
         'vcodec=$videoCodec acodec=$audioCodec vid=$vid '
@@ -171,18 +212,29 @@ class VideoStallSnapshot {
 class VideoStallObserveResult {
   const VideoStallObserveResult({
     this.logStart = false,
+    this.logTick = false,
+    this.logPause = false,
     this.isStalled = false,
     this.recovery,
+    this.reasons = const [],
   });
 
   final bool logStart;
+  final bool logTick;
+  final bool logPause;
   final bool isStalled;
   final VideoStallRecoveryAction? recovery;
+  final List<VideoStallReason> reasons;
 }
 
 /// Detects video renderer stall (picture frozen) while the audio/playback
 /// clock keeps advancing. Extracted so the decision logic is unit-testable
 /// without a live mpv instance.
+///
+/// Samsung S26 Ultra (2026-10-12 capture): every START line had `videoPts=-`
+/// because libmpv `video-pts` stayed unavailable, so the old detector never
+/// incremented stuck ticks. Fall back to `estimated-vf-fps` collapsing while
+/// the audio/time-pos clock still moves, after the stream has armed.
 class VideoStallMonitor {
   VideoStallMonitor({this.now});
 
@@ -194,6 +246,9 @@ class VideoStallMonitor {
   VideoStallSnapshot? previous;
   bool loggedStart = false;
   DateTime? lastRecoveryAt;
+  int watchTicks = 0;
+  int pendingDecoderFaults = 0;
+  bool everArmed = false;
 
   void resetForNewMedia() {
     stuckTicks = 0;
@@ -201,24 +256,55 @@ class VideoStallMonitor {
     previous = null;
     loggedStart = false;
     lastRecoveryAt = null;
+    watchTicks = 0;
+    pendingDecoderFaults = 0;
+    everArmed = false;
+  }
+
+  void noteDecoderFault() {
+    pendingDecoderFaults++;
+  }
+
+  int takeDecoderFaults() {
+    final n = pendingDecoderFaults;
+    pendingDecoderFaults = 0;
+    return n;
   }
 
   VideoStallObserveResult observe(VideoStallSnapshot snap) {
-    final resultLogStart = !loggedStart && snap.shouldWatch;
+    final prev = previous;
+    final logPause = prev != null && prev.shouldWatch && !snap.shouldWatch;
+    if (snap.shouldWatch && snap.isArmed) {
+      everArmed = true;
+    }
+    final resultLogStart = !loggedStart && snap.shouldWatch && snap.isArmed;
     if (resultLogStart) {
       loggedStart = true;
+    }
+
+    var logTick = false;
+    if (snap.shouldWatch) {
+      watchTicks++;
+      logTick = watchTicks % kVideoStallHeartbeatEvery == 0;
     }
 
     if (!snap.shouldWatch) {
       stuckTicks = 0;
       previous = snap;
-      return VideoStallObserveResult(logStart: resultLogStart);
+      return VideoStallObserveResult(
+        logStart: resultLogStart,
+        logTick: logTick,
+        logPause: logPause,
+      );
     }
 
-    final prev = previous;
     previous = snap;
     if (prev == null || !prev.shouldWatch) {
-      return VideoStallObserveResult(logStart: resultLogStart);
+      return VideoStallObserveResult(
+        logStart: resultLogStart,
+        logTick: logTick,
+        logPause: logPause,
+      );
     }
 
     final clockAdvanced = _advanced(prev.clockPts, snap.clockPts);
@@ -227,19 +313,42 @@ class VideoStallMonitor {
     if (_jumpedBack(prev.clockPts, snap.clockPts) ||
         _jumpedBack(prev.videoPts, snap.videoPts)) {
       stuckTicks = 0;
-      return VideoStallObserveResult(logStart: resultLogStart);
+      return VideoStallObserveResult(
+        logStart: resultLogStart,
+        logTick: logTick,
+        logPause: logPause,
+      );
     }
 
-    // Require a real video PTS sample so missing properties don't false-positive.
-    final canDetect = snap.videoPts != null && snap.clockPts != null;
-    if (canDetect && clockAdvanced && !videoAdvanced) {
+    final reasons = <VideoStallReason>[];
+    if (snap.videoPts != null && clockAdvanced && !videoAdvanced) {
+      reasons.add(VideoStallReason.videoPtsFrozen);
+    }
+    // Only use vf-fps after we have seen frames flowing. Otherwise startup
+    // (vfFps still 0 / unset) would look like a freeze. Keep using everArmed
+    // so a collapsed snapshot (vfFps=0 → isArmed=false) still counts.
+    if (everArmed &&
+        snap.vfFpsCollapsed &&
+        clockAdvanced &&
+        snap.videoPts == null) {
+      reasons.add(VideoStallReason.vfFpsCollapsed);
+    }
+    if (snap.decoderUnhappy && clockAdvanced) {
+      reasons.add(VideoStallReason.decoderFaults);
+    }
+
+    if (reasons.isNotEmpty) {
       stuckTicks++;
     } else {
       stuckTicks = 0;
     }
 
     if (stuckTicks < kVideoStallTickThreshold) {
-      return VideoStallObserveResult(logStart: resultLogStart);
+      return VideoStallObserveResult(
+        logStart: resultLogStart,
+        logTick: logTick,
+        logPause: logPause,
+      );
     }
 
     VideoStallRecoveryAction? action;
@@ -256,8 +365,11 @@ class VideoStallMonitor {
 
     return VideoStallObserveResult(
       logStart: resultLogStart,
+      logTick: logTick,
+      logPause: logPause,
       isStalled: true,
       recovery: action,
+      reasons: reasons,
     );
   }
 
@@ -295,8 +407,19 @@ abstract final class VideoStallLog {
   static void start(VideoStallSnapshot snap) =>
       _log('START ${snap.toLogLine()}');
 
-  static void stall(VideoStallSnapshot snap, {required int recoveries}) =>
-      _log('STALL recoveries=$recoveries ${snap.toLogLine()}');
+  static void tick(VideoStallSnapshot snap) => _log('TICK ${snap.toLogLine()}');
+
+  static void pause(VideoStallSnapshot snap) =>
+      _log('PAUSE ${snap.toLogLine()}');
+
+  static void stall(
+    VideoStallSnapshot snap, {
+    required int recoveries,
+    List<VideoStallReason> reasons = const [],
+  }) => _log(
+    'STALL recoveries=$recoveries reason=${reasons.map((e) => e.name).join(",")}'
+    ' ${snap.toLogLine()}',
+  );
 
   static void recovery(
     VideoStallRecoveryAction action,
@@ -305,6 +428,8 @@ abstract final class VideoStallLog {
 
   static void recoverySkipped(VideoStallSnapshot snap) =>
       _log('STALL_NO_RECOVERY autoRecover=off ${snap.toLogLine()}');
+
+  static void hwdecFallback(String detail) => _log('HWDEC_FALLBACK $detail');
 
   static void surface({required int? from, required int? to}) {
     final kind = to == null ? 'SURFACE_INVALID' : 'SURFACE';

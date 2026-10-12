@@ -1470,6 +1470,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
               text: log.text,
             );
           }
+          if (Platform.isAndroid) {
+            _noteMpvLogForStall(log);
+          }
           if (kDebugMode) {
             debugPrint(log.toString());
           }
@@ -1578,7 +1581,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
   }
 
-  /// Always keep warn/error. With the verbose toggle, also keep vd/vo/hwdec debug.
+  /// Always keep warn/error. With the verbose toggle, also keep vd/vo/hwdec
+  /// plus cplayer/cache/demux so pause/exit/cache events show in the export.
   static bool _shouldForwardMpvLog(PlayerLog log) {
     final level = log.level.toLowerCase();
     if (level == 'error' ||
@@ -1594,16 +1598,38 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         prefix.startsWith('vf') ||
         prefix.startsWith('ad') ||
         prefix.startsWith('ao') ||
+        prefix.startsWith('cplayer') ||
+        prefix.startsWith('cache') ||
+        prefix.startsWith('demux') ||
         prefix.contains('hwdec') ||
         prefix.contains('mediacodec') ||
         prefix.contains('ffmpeg') ||
-        prefix.contains('decode');
+        prefix.contains('decode') ||
+        prefix.contains('timeline');
+  }
+
+  void _noteMpvLogForStall(PlayerLog log) {
+    final text = log.text;
+    if (text.contains('Error while decoding frame') ||
+        text.contains('Too many packets in the demuxer') ||
+        text.contains('Invalid NAL unit size') ||
+        text.contains('missing picture in access unit')) {
+      _videoStallMonitor.noteDecoderFault();
+    }
+    if (text.contains('Using software decoding') ||
+        text.contains('Attempting next decoding method')) {
+      VideoStallLog.hwdecFallback('${log.prefix}: $text');
+    }
   }
 
   VideoStallSnapshot _readVideoStallSnapshot(NativePlayer player) {
-    double? asDouble(String name) =>
-        double.tryParse(_mpvProperty(player, name));
-    int? asInt(String name) => int.tryParse(_mpvProperty(player, name));
+    double? asDouble(String name) {
+      var raw = _mpvProperty(player, name).trim();
+      if (raw.startsWith('+')) raw = raw.substring(1);
+      return double.tryParse(raw);
+    }
+
+    int? asInt(String name) => int.tryParse(_mpvProperty(player, name).trim());
     final state = player.state;
     return VideoStallSnapshot(
       playerStatus: playerStatus,
@@ -1641,6 +1667,11 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       playerReused: _playerReused,
       mediaPath: _stallMediaPath,
       appScene: _stallAppScene,
+      avsync: _mpvProperty(player, 'avsync'),
+      videoBitrate: _mpvProperty(player, 'packet-video-bitrate'),
+      decoderFaultCount: _videoStallMonitor.takeDecoderFaults(),
+      autoRecover: Pref.videoStallAutoRecover,
+      verboseLog: Pref.videoStallVerboseLog,
     );
   }
 
@@ -1652,8 +1683,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (result.logStart) {
         VideoStallLog.start(snap);
       }
+      if (result.logTick) {
+        VideoStallLog.tick(snap);
+      }
+      if (result.logPause) {
+        VideoStallLog.pause(snap);
+      }
       if (result.isStalled) {
-        VideoStallLog.stall(snap, recoveries: _videoStallMonitor.recoveries);
+        VideoStallLog.stall(
+          snap,
+          recoveries: _videoStallMonitor.recoveries,
+          reasons: result.reasons,
+        );
       }
       if (result.recovery case final action?) {
         if (Pref.videoStallAutoRecover) {

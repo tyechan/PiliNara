@@ -226,7 +226,7 @@ List<SettingsModel> get videoSettings => [
   ),
   const SwitchModel(
     title: '画面冻结详细日志',
-    subtitle: '提高 mpv vd/vo/hwdec 日志级别，写入 PiliVideoStall。略增耗电，抓 bug 时保持开启',
+    subtitle: '提高 mpv 日志级别，每 5 秒写 TICK（含 vfFps/avsync）。抓冻结时请打开，并关掉「自动恢复」',
     leading: Icon(Icons.bug_report_outlined),
     setKey: SettingBoxKey.videoStallVerboseLog,
     defaultVal: true,

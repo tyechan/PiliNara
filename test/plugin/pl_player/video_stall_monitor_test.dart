@@ -12,6 +12,8 @@ VideoStallSnapshot _snap({
   double? timePos = 10,
   double? videoPts = 10,
   double? audioPts = 10,
+  double? estimatedVfFps = 30,
+  int decoderFaultCount = 0,
   String hwdecCurrent = 'mediacodec',
   String vid = '1',
   String pausedForCache = 'no',
@@ -26,7 +28,7 @@ VideoStallSnapshot _snap({
     timePos: timePos,
     videoPts: videoPts,
     audioPts: audioPts,
-    estimatedVfFps: 30,
+    estimatedVfFps: estimatedVfFps,
     dropFrameCount: 0,
     voDropFrameCount: 0,
     voDelayedFrameCount: 0,
@@ -44,6 +46,7 @@ VideoStallSnapshot _snap({
     textureId: 7,
     width: 1920,
     height: 1080,
+    decoderFaultCount: decoderFaultCount,
   );
 }
 
@@ -186,14 +189,128 @@ void main() {
     expect(audioOnly.isStalled, isFalse);
   });
 
-  test('does not false-positive when video-pts is unavailable', () {
+  test('healthy vfFps with missing video-pts is not a stall', () {
     final monitor = VideoStallMonitor();
     for (var i = 0; i < 6; i++) {
       final result = monitor.observe(
-        _snap(timePos: 10.0 + i, videoPts: null, audioPts: 10.0 + i),
+        _snap(
+          timePos: 10.0 + i,
+          videoPts: null,
+          audioPts: 10.0 + i,
+          estimatedVfFps: 25,
+        ),
       );
       expect(result.isStalled, isFalse);
     }
+  });
+
+  test('unarmed startup does not log START or stall', () {
+    final monitor = VideoStallMonitor();
+    for (var i = 0; i < 6; i++) {
+      final result = monitor.observe(
+        _snap(
+          timePos: 10.0 + i,
+          videoPts: null,
+          audioPts: null,
+          estimatedVfFps: null,
+        ),
+      );
+      expect(result.logStart, isFalse);
+      expect(result.isStalled, isFalse);
+    }
+  });
+
+  test('START waits until vfFps or video-pts arms the detector', () {
+    final monitor = VideoStallMonitor();
+    final unarmed = monitor.observe(
+      _snap(timePos: 10, videoPts: null, audioPts: null, estimatedVfFps: null),
+    );
+    expect(unarmed.logStart, isFalse);
+
+    final armed = monitor.observe(
+      _snap(
+        timePos: 11,
+        videoPts: null,
+        audioPts: 11,
+        estimatedVfFps: 25,
+      ),
+    );
+    expect(armed.logStart, isTrue);
+    expect(armed.isStalled, isFalse);
+  });
+
+  test(
+    'flags stall when vfFps collapses after arming and clock still moves',
+    () {
+      final monitor = VideoStallMonitor(now: () => DateTime(2026, 10, 12));
+      monitor.observe(
+        _snap(timePos: 136, videoPts: null, audioPts: 136, estimatedVfFps: 25),
+      );
+
+      VideoStallObserveResult? last;
+      for (var i = 1; i <= kVideoStallTickThreshold; i++) {
+        last = monitor.observe(
+          _snap(
+            timePos: 136.0 + i,
+            videoPts: null,
+            audioPts: 136.0 + i,
+            estimatedVfFps: 0,
+          ),
+        );
+      }
+      expect(last!.isStalled, isTrue);
+      expect(last.reasons, contains(VideoStallReason.vfFpsCollapsed));
+      expect(last.recovery, VideoStallRecoveryAction.seekFlush);
+    },
+  );
+
+  test('decoder fault flood while clock moves is a stall', () {
+    final monitor = VideoStallMonitor(now: () => DateTime(2026, 10, 12));
+    monitor.observe(
+      _snap(timePos: 10, videoPts: null, audioPts: 10, estimatedVfFps: 25),
+    );
+    VideoStallObserveResult? last;
+    for (var i = 1; i <= kVideoStallTickThreshold; i++) {
+      last = monitor.observe(
+        _snap(
+          timePos: 10.0 + i,
+          videoPts: null,
+          audioPts: 10.0 + i,
+          estimatedVfFps: 25,
+          decoderFaultCount: kVideoStallDecoderFaultThreshold,
+        ),
+      );
+    }
+    expect(last!.isStalled, isTrue);
+    expect(last.reasons, contains(VideoStallReason.decoderFaults));
+  });
+
+  test('PAUSE is logged when playback leaves the watch state', () {
+    final monitor = VideoStallMonitor();
+    monitor.observe(_snap(timePos: 10, videoPts: 10, audioPts: 10));
+    final paused = monitor.observe(
+      _snap(
+        status: PlayerStatus.paused,
+        playing: false,
+        timePos: 11,
+        videoPts: 10,
+        audioPts: 11,
+      ),
+    );
+    expect(paused.logPause, isTrue);
+    expect(paused.isStalled, isFalse);
+  });
+
+  test('heartbeat TICK every N watch polls', () {
+    final monitor = VideoStallMonitor();
+    var ticks = 0;
+    for (var i = 1; i <= kVideoStallHeartbeatEvery; i++) {
+      final result = monitor.observe(
+        _snap(timePos: 10.0 + i, videoPts: 10.0 + i, audioPts: 10.0 + i),
+      );
+      if (result.logTick) ticks++;
+    }
+    expect(ticks, 1);
   });
 
   test('resetForNewMedia clears recovery budget', () {

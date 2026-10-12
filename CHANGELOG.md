@@ -8,6 +8,7 @@
 - **视频参数面板新增音频延迟**：播放器三点菜单的「视频参数」面板在原五项画面参数基础上新增音频延迟调节（±1000 ms，步进 10 ms），对应 mpv 的 `--audio-delay`，用于补偿蓝牙耳机等设备造成的音画不同步。是否跨视频保留跟随「播放器设置仅对当前生效」开关。
 - **Android 视频画面冻结诊断**：播放中若画面 PTS 停住而音频时钟仍在走，写入可过滤的 `PiliVideoStall` 日志，并尝试 seek 刷新解码器 / 切到 `mediacodec-copy` / 重开媒体。
 - **画面冻结一次抓全**：START/STALL 记录 requested/actual hwdec、编解码、分辨率、fps、vo、texture、音视频 PTS、丢帧、缓存、是否复用播放器、前台/后台/PiP。设置里可关自动恢复以便抓「纯冻结」。日志页可复制画面冻结日志；mpv warn/error（以及详细日志开关下的 vd/vo/hwdec debug）写入同一文件与 logcat。
+- **画面冻结检测补强（S26 Ultra 日志）**：libmpv 的 `video-pts` 在 `vo=gpu` + `mediacodec-copy` 下经常读不到，旧看门狗因此整场都不打 STALL。改为：等 `estimated-vf-fps` 正常出帧后再开始监视；画面 fps 掉到接近 0 而音频/`time-pos` 仍在走也算冻结；每 5 秒写 TICK；暂停写 PAUSE；硬解回退写 HWDEC_FALLBACK。自动恢复仍默认开，抓「纯冻结」时请关掉。
 
 ### Changed
 - 播放器三点菜单入口与面板标题由「视频画面参数」更名为「视频参数」，以涵盖新增的音频延迟项。
