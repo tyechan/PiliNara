@@ -17,11 +17,11 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
 # update when release
-version: 2.1.3+1
+version: 2.1.6+1
 
 environment:
   sdk: ">=3.13.0"
-  flutter: 3.47.2
+  flutter: 3.47.7
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -52,7 +52,7 @@ dependencies:
   brotli: ^0.6.0
   cached_network_image_ce:
     git:
-      url: https://github.com/My-Responsitories/flutter_cached_network_image_ce.git
+      url: https://github.com/bggRGjQaUbCoE/flutter_cached_network_image_ce.git
       path: cached_network_image
       ref: develop
   canvas_danmaku:
@@ -75,10 +75,6 @@ dependencies:
   cookie_jar: ^4.0.8
   crypto: ^3.0.6
   cupertino_ui: ^1.0.0
-  desktop_webview_window:
-    git:
-      url: https://github.com/Predidit/linux_webview_window
-      ref: main
   device_info_plus: ^13.1.0
   dio: ^5.9.1
   dio_http2_adapter: ^2.7.1
@@ -91,7 +87,7 @@ dependencies:
       url: https://github.com/bggRGjQaUbCoE/extended_nested_scroll_view.git
       ref: dev
   ffi: ^2.2.0
-  file_picker: ^12.0.0
+  file_picker: ^13.1.0
   fixnum: ^1.1.1
   fl_chart: ^1.0.0
   flex_seed_scheme: ^5.0.0
@@ -112,6 +108,7 @@ dependencies:
     git:
       url: https://github.com/bggRGjQaUbCoE/flutter_sortable_wrap.git
       ref: master
+  flutter_staggered_grid_view: ^0.7.0
   flutter_svg: ^2.0.14
   flutter_volume_controller: ^2.0.0
   font_awesome_flutter:
@@ -167,12 +164,11 @@ dependencies:
       url: https://github.com/bggRGjQaUbCoE/super_sliver_list.git
       ref: mod
   synchronized: ^3.3.0
-  tray_manager: ^0.5.1
+  tray_manager: ^0.8.0
   url_launcher: ^6.3.1
   uuid: ^4.5.1
   vector_math: ^2.2.0
   wakelock_plus: ^1.2.8
-  waterfall_flow: ^3.1.0
   web_socket_channel: ^3.0.3
   webdav_client:
     git:
@@ -235,11 +231,6 @@ dependency_overrides:
       url: https://github.com/Starfallan/media-kit.git
       path: media_kit_video
       ref: native
-  cached_network_image_ce:
-    git:
-      url: https://github.com/My-Responsitories/flutter_cached_network_image_ce.git
-      path: cached_network_image
-      ref: develop
 
 dev_dependencies:
   flutter_test:

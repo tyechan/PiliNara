@@ -1,7 +1,6 @@
 import 'dart:math';
 
 import 'package:PiliPlus/http/loading_state.dart';
-import 'package:PiliPlus/models/common/search/search_type.dart';
 import 'package:PiliPlus/models/common/search/video_search_type.dart';
 import 'package:PiliPlus/models/search/result.dart';
 import 'package:PiliPlus/pages/search/widgets/search_text.dart';
@@ -16,6 +15,26 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 
+mixin SearchVideoMixin on SearchVideoController {
+  @override
+  bool customHandleResponse(bool isRefresh, Success<SearchVideoData> response) {
+    if (isRefresh && !hasJump2Video) {
+      hasJump2Video = true;
+      _onPushDetail(response.response.list);
+    }
+    return super.customHandleResponse(isRefresh, response);
+  }
+
+  void _onPushDetail(List<SearchVideoItemModel>? resultList) {
+    try {
+      final aid = int.tryParse(keyword);
+      if (aid != null && resultList?.firstOrNull?.aid == aid) {
+        PiliScheme.videoPush(aid, null, showDialog: false);
+      }
+    } catch (_) {}
+  }
+}
+
 class SearchVideoController
     extends SearchPanelController<SearchVideoData, SearchVideoItemModel> {
   SearchVideoController({
@@ -24,54 +43,25 @@ class SearchVideoController
     required super.tag,
   });
 
-  late bool hasJump2Video = false;
+  bool hasJump2Video = false;
+
+  static final _b23Regex = RegExp(
+    r'b23\.tv/[A-Za-z0-9]{7}$',
+    caseSensitive: false,
+  );
 
   @override
   void onInit() {
     super.onInit();
-    videoDurationType = VideoDurationType.all;
-    videoZoneType = VideoZoneType.all;
+    videoDurationType = .all;
+    videoZoneType = .all;
     DateTime now = DateTime.now();
     pubBeginDate = DateTime(now.year, now.month, 1, 0, 0, 0);
     pubEndDate = DateTime(now.year, now.month, now.day, 23, 59, 59);
-
-    jump2Video();
+    _jump2Video();
   }
 
-  @override
-  List<SearchVideoItemModel>? getDataList(SearchVideoData response) {
-    return response.list;
-  }
-
-  @override
-  bool customHandleResponse(bool isRefresh, Success<SearchVideoData> response) {
-    searchResultController?.count[searchType.index] =
-        response.response.numResults ?? 0;
-    final list = response.response.list;
-    if (list != null) {
-      list.removeWhere(
-        (item) => RecommendFilter.searchShouldRemove(item.owner.mid, item.title),
-      );
-    }
-    if (searchType == SearchType.video && !hasJump2Video && isRefresh) {
-      hasJump2Video = true;
-      onPushDetail(list);
-    }
-    return false;
-  }
-
-  void onPushDetail(List<SearchVideoItemModel>? resultList) {
-    try {
-      int? aid = int.tryParse(keyword);
-      if (aid != null && resultList?.firstOrNull?.aid == aid) {
-        PiliScheme.videoPush(aid, null, showDialog: false);
-      }
-    } catch (_) {}
-  }
-
-  static final _b23Regex = RegExp(r'b23\.tv/[A-Za-z0-9]{7}$', caseSensitive: false);
-
-  Future<void> jump2Video() async {
+  Future<void> _jump2Video() async {
     if (IdUtils.avRegexExact.hasMatch(keyword)) {
       hasJump2Video = true;
       PiliScheme.videoPush(
@@ -95,6 +85,22 @@ class SearchVideoController
         }
       }
     }
+  }
+
+  @override
+  List<SearchVideoItemModel>? getDataList(SearchVideoData response) {
+    return response.list;
+  }
+
+  @override
+  bool customHandleResponse(bool isRefresh, Success<SearchVideoData> response) {
+    final list = response.response.list;
+    if (list != null) {
+      list.removeWhere(
+        (item) => RecommendFilter.searchShouldRemove(item.owner.mid, item.title),
+      );
+    }
+    return super.customHandleResponse(isRefresh, response);
   }
 
   final Rx<ArchiveFilterType> selectedType = ArchiveFilterType.totalrank.obs;

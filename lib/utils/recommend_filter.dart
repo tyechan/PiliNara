@@ -28,7 +28,11 @@ abstract final class RecommendFilter {
     return mid != null && GlobalData().whitelistMids.containsKey(mid);
   }
 
-  static bool filter(BaseVideoItemModel videoItem) {
+  static bool filter(BaseVideoItemModel videoItem) =>
+      filterWithExempt(videoItem);
+
+  // (web/app)rcmd
+  static bool filterWithExempt(BaseVideoItemModel videoItem) {
     final mid = videoItem.owner.mid;
     if (filterUser(mid)) {
       return true;
@@ -43,6 +47,7 @@ abstract final class RecommendFilter {
     return filterAll(videoItem);
   }
 
+  /// hot/rank/[filterWithExempt]
   static bool filterLikeRatio(int? like, int? view) {
     if (view != null) {
       return (view > -1 && view < minPlayForRcmd) ||
@@ -53,6 +58,7 @@ abstract final class RecommendFilter {
     return false;
   }
 
+  /// hot/rank/[filterWithExempt]
   static bool filterTitle(String title) {
     return (enableFilter && rcmdRegExp.hasMatch(title));
   }
@@ -69,6 +75,12 @@ abstract final class RecommendFilter {
         recommendBlockedMids.containsKey(mid);
   }
 
+  /// [filterAll]
+  static bool filterDuration(int duration) {
+    return duration > 0 && duration < minDurationForRcmd;
+  }
+
+  /// related/[filterWithExempt]
   static bool filterAll(BaseVideoItemModel videoItem) {
     final mid = videoItem.owner.mid;
     if (filterUser(mid)) {
@@ -77,8 +89,7 @@ abstract final class RecommendFilter {
     if (isWhitelisted(mid)) {
       return false;
     }
-    return (videoItem.duration > 0 &&
-            videoItem.duration < minDurationForRcmd) ||
+    return filterDuration(videoItem.duration) ||
         filterLikeRatio(videoItem.stat.like, videoItem.stat.view) ||
         filterTitle(videoItem.title) ||
         filterUpName(videoItem.owner.name);

@@ -30,6 +30,13 @@ abstract class CommonSearchPanelState<
   SearchPanelController<R, T> get controller;
 
   bool _isLoadingMore = false;
+  late ColorScheme colorScheme;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    colorScheme = ColorScheme.of(context);
+  }
 
   @override
   bool get wantKeepAlive => true;
@@ -43,19 +50,18 @@ abstract class CommonSearchPanelState<
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    final theme = Theme.of(context);
     return refreshIndicator(
       onRefresh: controller.onRefresh,
       child: CustomScrollView(
         controller: controller.scrollController,
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-          ?buildHeader(theme),
+          ?buildHeader(),
           SliverPadding(
             padding: EdgeInsets.only(
               bottom: MediaQuery.viewPaddingOf(context).bottom + 100,
             ),
-            sliver: Obx(() => _buildBody(theme, controller.loadingState.value)),
+            sliver: Obx(() => _buildBody(controller.loadingState.value)),
           ),
         ],
       ),
@@ -64,22 +70,22 @@ abstract class CommonSearchPanelState<
 
   Widget get buildLoading;
 
-  Widget _buildBody(ThemeData theme, LoadingState<List<T>?> loadingState) {
+  Widget _buildBody(LoadingState<List<T>?> loadingState) {
     return switch (loadingState) {
       Loading() => buildLoading,
       Success(:final response) when response != null && response.isNotEmpty =>
         () {
           final filtered = controller.filterKeywords(response, getTitle);
           if (filtered.isEmpty) {
-            return _buildFilteredOut(theme);
+            return _buildFilteredOut();
           }
-          final showLoadMore = controller.hasKeywordFilter &&
-              filtered.length <= 5;
-          if (!showLoadMore) return buildList(theme, filtered);
+          final showLoadMore =
+              controller.hasKeywordFilter && filtered.length <= 5;
+          if (!showLoadMore) return buildList(filtered);
           return SliverMainAxisGroup(
             slivers: [
-              buildList(theme, filtered),
-              _buildInlineLoadMore(theme),
+              buildList(filtered),
+              _buildInlineLoadMore(),
             ],
           );
         }(),
@@ -102,7 +108,7 @@ abstract class CommonSearchPanelState<
     }
   }
 
-  Widget _buildFilteredOut(ThemeData theme) {
+  Widget _buildFilteredOut() {
     return SliverFillRemaining(
       hasScrollBody: false,
       child: Center(
@@ -114,7 +120,7 @@ abstract class CommonSearchPanelState<
               Icon(
                 Icons.filter_list_off,
                 size: 48,
-                color: theme.colorScheme.outline,
+                color: colorScheme.outline,
               ),
               const SizedBox(height: 12),
               Text(
@@ -122,7 +128,7 @@ abstract class CommonSearchPanelState<
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w500,
-                  color: theme.colorScheme.onSurface,
+                  color: colorScheme.onSurface,
                 ),
               ),
               const SizedBox(height: 6),
@@ -131,13 +137,12 @@ abstract class CommonSearchPanelState<
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 13,
-                  color: theme.colorScheme.outline,
+                  color: colorScheme.outline,
                 ),
               ),
               const SizedBox(height: 16),
               FilledButton.tonalIcon(
-                onPressed:
-                    _isLoadingMore ? null : _onLoadMoreWithCooldown,
+                onPressed: _isLoadingMore ? null : _onLoadMoreWithCooldown,
                 icon: _isLoadingMore
                     ? const SizedBox(
                         width: 18,
@@ -153,7 +158,7 @@ abstract class CommonSearchPanelState<
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 11,
-                  color: theme.colorScheme.outline,
+                  color: colorScheme.outline,
                 ),
               ),
             ],
@@ -163,16 +168,13 @@ abstract class CommonSearchPanelState<
     );
   }
 
-  Widget? buildHeader(ThemeData theme) => null;
-
-  Widget _buildInlineLoadMore(ThemeData theme) {
+  Widget _buildInlineLoadMore() {
     return SliverToBoxAdapter(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 16),
         child: Center(
           child: FilledButton.tonalIcon(
-            onPressed:
-                _isLoadingMore ? null : _onLoadMoreWithCooldown,
+            onPressed: _isLoadingMore ? null : _onLoadMoreWithCooldown,
             icon: _isLoadingMore
                 ? const SizedBox(
                     width: 18,
@@ -189,5 +191,7 @@ abstract class CommonSearchPanelState<
 
   String? getTitle(T item) => null;
 
-  Widget buildList(ThemeData theme, List<T> list);
+  Widget? buildHeader() => null;
+
+  Widget buildList(List<T> list);
 }

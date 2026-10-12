@@ -9,6 +9,7 @@ import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/sponsor_block.dart';
 import 'package:PiliPlus/http/video.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
+import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/download/bili_download_media_file_info.dart';
 import 'package:PiliPlus/models_new/download/playback_meta.dart';
@@ -27,7 +28,9 @@ import 'package:PiliPlus/utils/extension/file_ext.dart';
 import 'package:PiliPlus/utils/extension/string_ext.dart';
 import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
-import 'package:flutter/foundation.dart';
+import 'package:PiliPlus/utils/storage_pref.dart';
+import 'package:flutter/foundation.dart'
+    show kDebugMode, debugPrint, VoidCallback;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:path/path.dart' as path;
@@ -120,11 +123,13 @@ class DownloadService extends GetxService {
     return result;
   }
 
-  void downloadVideo(
-    Part page,
+  void downloadVideo({
+    required int index,
+    required Part page,
     VideoDetailData? videoDetail,
     ugc.EpisodeItem? videoArc,
-    VideoQuality videoQuality, {
+    required VideoQuality videoQuality,
+    SeasonInfo? seasonInfo,
     String? autoFolderTitle,
     String? autoFolderSourceKey,
   }) {
@@ -180,16 +185,17 @@ class DownloadService extends GetxService {
       pageData: pageData,
       autoFolderTitle: autoFolderTitle,
       autoFolderSourceKey: autoFolderSourceKey,
+      seasonInfo: seasonInfo,
     );
     _createDownload(entry);
   }
 
-  void downloadBangumi(
-    int index,
-    PgcInfoModel pgcItem,
-    pgc.EpisodeItem episode,
-    VideoQuality quality,
-  ) {
+  void downloadBangumi({
+    required int index,
+    required PgcInfoModel pgcItem,
+    required pgc.EpisodeItem episode,
+    required VideoQuality quality,
+  }) {
     final cid = episode.cid!;
     if (downloadList.indexWhere((e) => e.cid == cid) != -1) {
       return;
@@ -576,13 +582,71 @@ class DownloadService extends GetxService {
     }
   }
 
+  Future<bool> updateSegments(BiliDownloadEntryInfo entry) {
+    if (entry.pageData != null) {
+      return _updateBlockSegments(entry);
+    } else {
+      return _updatePgcSegments(entry);
+    }
+  }
+
+  Future<bool> _updateBlockSegments(BiliDownloadEntryInfo entry) async {
+    final res = await SponsorBlock.getSkipSegments(
+      bvid: entry.bvid,
+      cid: entry.pageData!.cid,
+    );
+    if (res case Success(:final response)) {
+      if (response.isNotEmpty) {
+        entry.segments = response;
+        await _updateBiliDownloadEntryJson(entry);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  Future<bool> _updatePgcSegments(BiliDownloadEntryInfo entry) async {
+    final ep = entry.ep;
+    if (ep == null) return false;
+    final res = await VideoHttp.videoUrl(
+      avid: entry.avid,
+      bvid: entry.bvid,
+      cid: entry.cid,
+      seasonId: entry.seasonId,
+      epid: ep.episodeId,
+      qn: entry.preferedVideoQuality,
+      tryLook: false,
+      videoType: switch (ep.from) {
+        'pugv' => .pugv,
+        _ => .pgc,
+      },
+    );
+    if (res case Success(:final response)) {
+      final clipInfoList = response.clipInfoList;
+      if (clipInfoList != null && clipInfoList.isNotEmpty) {
+        entry.segments = clipInfoList;
+        await _updateBiliDownloadEntryJson(entry);
+      }
+      return true;
+    }
+    return false;
+  }
+
+
   Future<void> _startDownload(BiliDownloadEntryInfo entry) async {
     try {
       if (!await downloadDanmaku(entry: entry)) {
         return;
       }
 
+      // ugc segments
+      if (entry.pageData != null && Pref.enableSponsorBlock) {
+        await _updateBlockSegments(entry);
+      }
+
       _updateCurStatus(DownloadStatus.getPlayUrl);
+
+      final noSegmentBefore = entry.segments == null;
 
       final downloadResult = await DownloadHttp.getVideoUrl(
         entry: entry,
@@ -591,6 +655,11 @@ class DownloadService extends GetxService {
         pageData: entry.pageData,
       );
       final mediaFileInfo = downloadResult.mediaFileInfo;
+
+      // pgc segments
+      if (noSegmentBefore && entry.segments != null) {
+        await _updateBiliDownloadEntryJson(entry);
+      }
 
       final videoDir = Directory(path.join(entry.entryDirPath, entry.typeTag));
       if (!videoDir.existsSync()) {

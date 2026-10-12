@@ -59,3 +59,8 @@ String remarkedName(int? mid, String rawName) {
   final firstLine = remark.split('\n').first.trim();
   return firstLine.isEmpty ? rawName : firstLine;
 }
+
+extension WhereNotBlockedExt<E> on Iterable<E> {
+  Iterable<E> whereNotBlocked(Object? /* mid */ Function(E element) test) =>
+      where((e) => !GlobalData().blackMids.contains(test(e)));
+}

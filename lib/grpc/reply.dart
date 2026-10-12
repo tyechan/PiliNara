@@ -4,6 +4,7 @@ import 'package:PiliPlus/grpc/bilibili/pagination.pb.dart';
 import 'package:PiliPlus/grpc/grpc_req.dart';
 import 'package:PiliPlus/grpc/url.dart';
 import 'package:PiliPlus/http/loading_state.dart';
+import 'package:PiliPlus/utils/global_data.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/user_whitelist.dart';
 import 'package:fixnum/fixnum.dart';
@@ -58,7 +59,8 @@ abstract final class ReplyGrpc {
     if (keepUpTopReply && replyControl.isUpTop) return false;
     if (keepUpLikeReply && replyControl.upLike) return false;
     if (keepUpReplyReply && replyControl.upReply) return false;
-    return (replyMinLevel > 0 && reply.member.level.toInt() < replyMinLevel) ||
+    return GlobalData().blackMids.contains(mid) ||
+        (replyMinLevel > 0 && reply.member.level.toInt() < replyMinLevel) ||
         (enableFilter && replyRegExp.hasMatch(reply.content.message));
   }
 

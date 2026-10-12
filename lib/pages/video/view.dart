@@ -39,10 +39,13 @@ import 'package:PiliPlus/pages/video/introduction/local/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/widgets/intro_detail.dart';
+import 'package:PiliPlus/pages/video/introduction/pgc/widgets/season.dart'
+    as pgc;
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/view.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/page.dart';
-import 'package:PiliPlus/pages/video/introduction/ugc/widgets/season.dart';
+import 'package:PiliPlus/pages/video/introduction/ugc/widgets/season.dart'
+    as ugc;
 import 'package:PiliPlus/pages/video/member/controller.dart';
 import 'package:PiliPlus/pages/video/member/view.dart';
 import 'package:PiliPlus/pages/video/related/view.dart';
@@ -126,12 +129,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   final _pageRootKey = GlobalKey();
 
   // intro ctr
-  late final CommonIntroController introController =
-      videoDetailController.isFileSource
-      ? localIntroController
-      : videoDetailController.isUgc
-      ? ugcIntroController
-      : pgcIntroController;
+  late final CommonIntroController introController;
   late final UgcIntroController ugcIntroController;
   late final PgcIntroController pgcIntroController;
   late final LocalIntroController localIntroController;
@@ -140,6 +138,42 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     if (!kDebugMode) return;
     logger.i('[${videoDetailController.hashCode}] [SponsorBlock] $message');
   }
+
+  // dart format off
+  CommonIntroController _initIntroCtr() {
+    final savedIntroController = _savedIntroControllerFromPip;
+    if (videoDetailController.isFileSource) {
+      if (savedIntroController is LocalIntroController) {
+        localIntroController = savedIntroController;
+        localIntroController.isEnteringPip = false;
+        Get.put(localIntroController, tag: heroTag);
+        _logSponsorBlock('Restored LocalIntroController from PiP');
+        return localIntroController;
+      }
+      return localIntroController = Get.put(LocalIntroController(), tag: heroTag);
+    } else if (videoDetailController.isUgc) {
+      if (savedIntroController is UgcIntroController) {
+        ugcIntroController = savedIntroController;
+        ugcIntroController.isEnteringPip = false;
+        Get.put(ugcIntroController, tag: heroTag);
+        _logSponsorBlock(
+          'Restored UgcIntroController from PiP, videoDetail.bvid: ${ugcIntroController.videoDetail.value.bvid}',
+        );
+        return ugcIntroController;
+      }
+      return ugcIntroController = Get.put(UgcIntroController(), tag: heroTag);
+    } else {
+      if (savedIntroController is PgcIntroController) {
+        pgcIntroController = savedIntroController;
+        pgcIntroController.isEnteringPip = false;
+        Get.put(pgcIntroController, tag: heroTag);
+        _logSponsorBlock('Restored PgcIntroController from PiP');
+        return pgcIntroController;
+      }
+      return pgcIntroController = Get.put(PgcIntroController(), tag: heroTag);
+    }
+  }
+  // dart format on
 
   bool get autoExitFullscreen =>
       videoDetailController.plPlayerController.autoExitFullscreen;
@@ -161,13 +195,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   bool get _shouldShowSeasonPanel {
     if (videoDetailController.isFileSource ||
         isPortrait ||
-        !videoDetailController.isUgc) {
+        !videoDetailController.plPlayerController.horizontalSeasonPanel) {
       return false;
     }
-    late final videoDetail = ugcIntroController.videoDetail.value;
-    return videoDetailController.plPlayerController.horizontalSeasonPanel &&
-        (videoDetail.ugcSeason != null ||
-            ((videoDetail.pages?.length ?? 0) > 1));
+    if (videoDetailController.isUgc) {
+      return ugcIntroController.videoDetail.value.hasSeasonOrParts;
+    }
+    return pgcIntroController.pgcItem.hasEpisodes;
   }
 
   void _resetEnteringPipFlags() {
@@ -302,8 +336,6 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       savedLive?.plPlayerController.pause();
     }
 
-    PlPlayerController.setPlayCallBack(playCallBack);
-
     // 如果从 PiP 返回或从外部入口点开同视频，尝试恢复保存的控制器
     if (shouldRestoreFromPip && PipOverlayService.isInPipMode) {
       final savedController = restoredController;
@@ -393,6 +425,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       videoDetailController = Get.put(VideoDetailController(), tag: heroTag);
     }
 
+    introController = _initIntroCtr();
+
+    _setPlayCallBack();
+
     if (videoDetailController.removeSafeArea) {
       hideSystemBar();
     }
@@ -421,48 +457,6 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           ),
           tag: heroTag,
         );
-      }
-    }
-
-    // 尝试从 PiP 恢复 IntroController
-    // 注意：_savedIntroControllerFromPip 在 stopPip 之前已提前取出
-    final savedIntroController =
-        _savedIntroControllerFromPip ??
-        (restoringFromPip
-            ? PipOverlayService.getAdditionalController('intro')
-            : null);
-
-    if (videoDetailController.isFileSource) {
-      if (savedIntroController != null &&
-          savedIntroController is LocalIntroController) {
-        localIntroController = savedIntroController;
-        localIntroController.isEnteringPip = false; // 重置标志
-        Get.put(localIntroController, tag: heroTag);
-        _logSponsorBlock('Restored LocalIntroController from PiP');
-      } else {
-        localIntroController = Get.put(LocalIntroController(), tag: heroTag);
-      }
-    } else if (videoDetailController.isUgc) {
-      if (savedIntroController != null &&
-          savedIntroController is UgcIntroController) {
-        ugcIntroController = savedIntroController;
-        ugcIntroController.isEnteringPip = false; // 重置标志
-        Get.put(ugcIntroController, tag: heroTag);
-        _logSponsorBlock(
-          'Restored UgcIntroController from PiP, videoDetail.bvid: ${ugcIntroController.videoDetail.value.bvid}',
-        );
-      } else {
-        ugcIntroController = Get.put(UgcIntroController(), tag: heroTag);
-      }
-    } else {
-      if (savedIntroController != null &&
-          savedIntroController is PgcIntroController) {
-        pgcIntroController = savedIntroController;
-        pgcIntroController.isEnteringPip = false; // 重置标志
-        Get.put(pgcIntroController, tag: heroTag);
-        _logSponsorBlock('Restored PgcIntroController from PiP');
-      } else {
-        pgcIntroController = Get.put(PgcIntroController(), tag: heroTag);
       }
     }
 
@@ -528,26 +522,22 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
 
         // 确保 IntroController 的数据被 UI 识别
         if (videoDetailController.isUgc &&
-            savedIntroController is UgcIntroController) {
+            introController is UgcIntroController) {
           _logSponsorBlock(
-            'UgcIntroController status: ${savedIntroController.status.value}, videoDetail items: ${savedIntroController.videoDetail.value.pages?.length}',
+            'UgcIntroController status: ${ugcIntroController.status.value}, videoDetail items: ${ugcIntroController.videoDetail.value.pages?.length}',
           );
-          savedIntroController.videoDetail.refresh();
-          savedIntroController.status.refresh();
-          savedIntroController.update();
+          ugcIntroController.videoDetail.refresh();
+          ugcIntroController.status.refresh();
+          ugcIntroController.update();
         } else if (videoDetailController.isFileSource &&
-            savedIntroController is LocalIntroController) {
-          savedIntroController.videoDetail.refresh();
-          savedIntroController.update();
+            introController is LocalIntroController) {
+          localIntroController.videoDetail.refresh();
+          localIntroController.update();
         } else if (!videoDetailController.isUgc &&
             !videoDetailController.isFileSource &&
-            savedIntroController is PgcIntroController) {
-          savedIntroController.videoDetail.refresh();
-          savedIntroController.update();
-        } else if (videoDetailController.isFileSource &&
-            savedIntroController is LocalIntroController) {
-          savedIntroController.videoDetail.refresh();
-          savedIntroController.update();
+            introController is PgcIntroController) {
+          pgcIntroController.videoDetail.refresh();
+          pgcIntroController.update();
         }
 
         // 同样刷新 ReplyController
@@ -633,6 +623,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       introController.cancelTimer();
       ctr.showDanmaku = false;
     }
+  }
+
+  void _setPlayCallBack() {
+    PlPlayerController.setPlayCallBack(
+      playCallBack,
+      playOwner: (tag: heroTag, type: introController.runtimeType),
+    );
   }
 
   Future<void>? playCallBack() {
@@ -838,7 +835,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     }
 
     // 2. 计算小窗触发状态
-    final playerStatusBeforePush = plPlayerController?.playerStatus.value;
+    final playerStatusBeforePush = plPlayerController?.playerStatus;
     final bool willStartPip =
         plPlayerController != null &&
         playerStatusBeforePush?.isPlaying == true &&
@@ -923,7 +920,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         // 小窗里的实际状态是用户最新的播放意图（可能在小窗中手动暂停过），
         // 先于关闭小窗记录，交由 didPopNext 末尾统一对账
         videoDetailController.playerStatus =
-            plPlayerController?.playerStatus.value;
+            plPlayerController?.playerStatus;
         // 返回展开：小窗飞回页内播放器位置，非销毁式 stopPip 推迟到握手完成；
         // 无法归位（无小窗会话）则维持旧的瞬时关闭
         if (PipOverlayService.transition.beginRestore()) {
@@ -988,7 +985,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       return;
     }
 
-    PlPlayerController.setPlayCallBack(playCallBack);
+    _setPlayCallBack();
 
     introController.startTimer();
 
@@ -2424,11 +2421,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           PgcIntroPage(
             key: videoIntroKey,
             heroTag: heroTag,
-            cid: videoDetailController.cid.value,
             showEpisodes: showEpisodes,
             showIntroDetail: showIntroDetail,
             maxWidth: width ?? maxWidth,
-            isLandscape: !isPortrait,
+            isPortrait: isPortrait,
           ),
         SliverToBoxAdapter(
           child: SizedBox(
@@ -2486,11 +2482,57 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   }
 
   Widget get seasonPanel {
-    final videoDetail = ugcIntroController.videoDetail.value;
+    if (videoDetailController.isUgc) return ugcSeasonPanel;
+    return pgcSeasonPanel;
+  }
+
+  Widget get pgcSeasonPanel {
+    Widget child = Obx(
+      () => EpisodePanel(
+        heroTag: heroTag,
+        enableSlide: false,
+        ugcIntroController: null,
+        type: .pgc,
+        cover: null,
+        list: [pgcIntroController.pgcItem.episodes!],
+        bvid: videoDetailController.bvid,
+        aid: videoDetailController.aid,
+        cid: videoDetailController.cid.value,
+        onChangeEpisode: pgcIntroController.onChangeEpisode,
+        showTitle: false,
+        isSupportReverse: false,
+      ),
+    );
+    if (pgcIntroController.pgcItem.hasSeasons) {
+      child = Column(
+        children: [
+          Padding(
+            padding: const .only(left: 12, top: 8, right: 12),
+            child: Builder(
+              builder: (context) {
+                return pgc.SeasonPanel(
+                  seasons: pgcIntroController.pgcItem.seasons!,
+                  pgcController: pgcIntroController,
+                  onSeasonChanged: () {
+                    if (context.mounted) (context as Element).markNeedsBuild();
+                  },
+                );
+              },
+            ),
+          ),
+          Expanded(child: child),
+        ],
+      );
+    }
+    return KeepAliveWrapper(child: child);
+  }
+
+  Widget get ugcSeasonPanel {
+    final videoDetail = ugcIntroController.videoDetail.rawValue;
     return KeepAliveWrapper(
       child: Column(
         children: [
-          if ((videoDetail.pages?.length ?? 0) > 1)
+          if (videoDetail.hasParts)
             if (videoDetail.ugcSeason != null)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -2508,10 +2550,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                     key: seasonEpisodeKey,
                     heroTag: heroTag,
                     enableSlide: false,
-                    ugcIntroController: videoDetailController.isUgc
-                        ? ugcIntroController
-                        : null,
-                    type: EpisodeType.part,
+                    ugcIntroController: ugcIntroController,
+                    type: .part,
                     list: [videoDetail.pages!],
                     cover: videoDetailController.cover.value,
                     bvid: videoDetailController.bvid,
@@ -2522,13 +2562,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                         ? ugcIntroController.onChangeEpisode
                         : pgcIntroController.onChangeEpisode,
                     showTitle: false,
-                    isSupportReverse: videoDetailController.isUgc,
+                    isSupportReverse: true,
                     onReverse: () => onReversePlay(isSeason: false),
                   ),
                 ),
               ),
           if (videoDetail.ugcSeason != null) ...[
-            if ((videoDetail.pages?.length ?? 0) > 1) ...[
+            if (videoDetail.hasParts) ...[
               const SizedBox(height: 8),
               Divider(
                 height: 1,
@@ -2538,7 +2578,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Obx(
-                () => SeasonPanel(
+                () => ugc.SeasonPanel(
                   key: ValueKey(introController.videoDetail.value),
                   heroTag: heroTag,
                   canTap: false,
@@ -2553,10 +2593,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                   key: seasonEpisodeKey,
                   heroTag: heroTag,
                   enableSlide: false,
-                  ugcIntroController: videoDetailController.isUgc
-                      ? ugcIntroController
-                      : null,
-                  type: EpisodeType.season,
+                  ugcIntroController: ugcIntroController,
+                  type: .season,
                   initialTabIndex: videoDetailController.seasonIndex.value,
                   cover: videoDetailController.cover.value,
                   seasonId: videoDetail.ugcSeason!.id,
@@ -2574,7 +2612,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                       ? ugcIntroController.onChangeEpisode
                       : pgcIntroController.onChangeEpisode,
                   showTitle: false,
-                  isSupportReverse: videoDetailController.isUgc,
+                  isSupportReverse: true,
                   onReverse: () => onReversePlay(isSeason: true),
                 ),
               ),
@@ -2873,7 +2911,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       );
       return false;
     }
-    if (controller.playerStatus.value != PlayerStatus.playing) {
+    if (controller.playerStatus != PlayerStatus.playing) {
       _logSponsorBlock('Reject PiP: video is paused');
       return false;
     }
@@ -3073,6 +3111,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   void onShowMemberPage(int? mid) {
     videoDetailController.childKey.currentState?.showBottomSheet(
       constraints: const BoxConstraints(),
+      dragHeight: 100,
       (context) {
         return HorizontalMemberPage(
           mid: mid,

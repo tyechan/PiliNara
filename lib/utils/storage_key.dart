@@ -185,6 +185,7 @@ abstract final class SettingBoxKey {
       appVolume = 'appVolume',
       enableVolumeBoost = 'enableVolumeBoost',
       downloadPath = 'downloadPath',
+      imageSavePath = 'imageSavePath',
       followOrderType = 'followOrderType',
       enableImgMenu = 'enableImgMenu',
       showDynDispute = 'showDynDispute',
@@ -195,7 +196,9 @@ abstract final class SettingBoxKey {
       removeSafeArea = 'removeSafeArea',
       angleDegrees = 'angleDegrees',
       liveStream = 'liveStream',
-      enableDocProvider = 'enableDocProvider';
+      enableDocProvider = 'enableDocProvider',
+      enableEmoteTooltip = 'enableEmoteTooltip',
+      mineTabs = 'mineTabs';
 
   static const String enableAiChat = 'enableAiChat',
       aiApiUrl = 'aiApiUrl',

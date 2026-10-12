@@ -1,4 +1,6 @@
 // mpv --hwdec=help
+import 'dart:io' show Platform;
+
 enum HwDecType {
   no('no', '启用软解'),
   auto('auto', '启用任意可用解码器'),
@@ -48,6 +50,10 @@ enum HwDecType {
     HwDecType.mediacodecCopy.hwdec,
     HwDecType.autoSafe.hwdec,
   ].join(',');
+
+  static final String kHwdec = Platform.isAndroid
+      ? androidDefault
+      : auto.hwdec;
 
   /// mpv `hwdec-current` for zero-copy Android MediaCodec (not copy-back).
   static bool isDirectMediacodec(String? hwdecCurrent) {
