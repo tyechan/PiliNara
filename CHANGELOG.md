@@ -11,6 +11,7 @@
 - **画面冻结检测补强（S26 Ultra 日志）**：libmpv 的 `video-pts` 在 `vo=gpu` + `mediacodec-copy` 下经常读不到，旧看门狗因此整场都不打 STALL。改为：等 `estimated-vf-fps` 正常出帧后再开始监视；画面 fps 掉到接近 0 而音频/`time-pos` 仍在走也算冻结；每 5 秒写 TICK；暂停写 PAUSE；硬解回退写 HWDEC_FALLBACK。自动恢复仍默认开，抓「纯冻结」时请关掉。
 - **视频轨 EOF / NAL 损坏自动重开**：`estimated-vf-fps` 在视频死后仍会停在容器帧率，不能当「正在出帧」。改为同时检测：视频轨 EOF（`video EOF (status=4)` / filter EOF）而音频还在走且未到片尾；NAL/解码错误爆发（并粘滞 3 秒，避免 1Hz 轮询把计数清零）；帧号不再前进。此类故障不再 seek（损坏码流上 seek 会跳到离谱偏移），而是按当前进度重开，第二次换 CDN 主机。点播关闭 lavf HTTP reconnect / 长连接，并丢弃损坏 demux 包。
 - **点播多线程加速（实验）**：本机 127.0.0.1 代理接管 DASH 音视频，按 Range 并行从多个大陆 CDN 拉流并校验 206。用来扛海外线路单连接被重置、以及 720P/1080P 缓冲过慢。默认开，可关回直连。
+- **12d 打不开视频的修复**：代理先探测首包，失败立刻回退直连；mpv 打不开 127.0.0.1 也会自动回退。CDN 回了更宽的 206 窗口也能切片。`stream-lavf-o` 改用 setProperty（逗号分隔），不再写进 extras。
 
 ### Changed
 - 播放器三点菜单入口与面板标题由「视频画面参数」更名为「视频参数」，以涵盖新增的音频延迟项。

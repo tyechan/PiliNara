@@ -76,27 +76,32 @@ class VodSession {
     return '${(n / 1024).toStringAsFixed(0)}KB';
   }
 
-  Future<int> ensureSize() async {
+  /// Probe the original host for Content-Length / Content-Range total.
+  /// Must finish quickly: mpv waits on the first proxy response.
+  Future<int> ensureSize({
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
     final known = fileSize;
     if (known != null && known > 0) return known;
-    final range = const ByteRange(0, 1);
-    final probe = await _fetchRange(range, urgent: true);
+    final probeEnd = chunkSize < 4096 ? chunkSize : 4096;
+    final probe = await _fetchRange(
+      ByteRange(0, probeEnd),
+      urgent: true,
+    ).timeout(timeout);
     fileSize ??= probe.total;
-    _chunks[0] = probe.bytes.length >= chunkSize
-        ? probe.bytes.sublist(0, 1)
-        : probe.bytes;
-    // Don't keep a 1-byte stub as chunk 0; refetch the real first chunk later.
-    _chunks.remove(0);
+    final size = fileSize ?? 0;
+    if (probe.bytes.isNotEmpty &&
+        probe.bytes.length >= (size > 0 ? min(probeEnd, size) : probeEnd)) {
+      // Not a full chunk — drop so _chunk(0) refetches the real slice.
+    }
     VideoStallLog.proxy(
-      'size id=$id kind=$kind bytes=${fileSize ?? -1} '
+      'size id=$id kind=$kind bytes=$size '
       'hosts=${pool.hosts.map((h) => h.host).join(",")}',
     );
     if (pool.nearDeadline) {
-      VideoStallLog.proxy(
-        'deadline-soon id=$id deadline=${pool.deadlineSec}',
-      );
+      VideoStallLog.proxy('deadline-soon id=$id deadline=${pool.deadlineSec}');
     }
-    return fileSize ?? 0;
+    return size;
   }
 
   Stream<List<int>> read(int start, int endExclusive) async* {
@@ -173,9 +178,9 @@ class VodSession {
       if (url == null) break;
       lastHost = Uri.tryParse(url)?.host;
       try {
-        final result = urgent && attempt == 0
-            ? await _hedgedGet(url, range)
-            : await _get(url, range);
+        final result = await _get(url, range).timeout(
+          const Duration(seconds: 6),
+        );
         _bytesFetched += result.bytes.length;
         if (result.bytes.length != range.length) {
           pool.recordFailure(url, reason: 'short-read');
@@ -208,29 +213,6 @@ class VodSession {
     throw lastError ?? StateError('no host for $range');
   }
 
-  Future<({Uint8List bytes, int total})> _hedgedGet(
-    String url,
-    ByteRange range,
-  ) async {
-    final primary = _get(url, range);
-    final backupUrl = pool.pickUrl(avoidHost: Uri.tryParse(url)?.host);
-    if (backupUrl == null) return primary;
-    final backup = Future<({Uint8List bytes, int total})?>(() async {
-      await Future<void>.delayed(const Duration(milliseconds: 400));
-      try {
-        return await _get(backupUrl, range);
-      } catch (_) {
-        return null;
-      }
-    });
-    final first = await Future.any([
-      primary.then<(bool, ({Uint8List bytes, int total})?)>((v) => (true, v)),
-      backup.then<(bool, ({Uint8List bytes, int total})?)>((v) => (false, v)),
-    ]);
-    if (first.$2 != null) return first.$2!;
-    return primary;
-  }
-
   Future<({Uint8List bytes, int total})> _get(
     String url,
     ByteRange range,
@@ -254,31 +236,52 @@ class VodSession {
       final parsed = ContentRangeReply.parse(
         resp.headers.value(HttpHeaders.contentRangeHeader),
       );
-      if (parsed == null ||
-          !parsed.matches(
-            start: range.start,
-            endInclusive: range.endInclusive,
-          )) {
+      if (parsed == null) {
         throw StateError(
           'bad Content-Range ${resp.headers.value(HttpHeaders.contentRangeHeader)}',
         );
       }
+      fileSize ??= parsed.total;
+      final slice = _sliceCovered(body, parsed, range);
       pool.recordSuccess(
         url,
-        bytes: body.length,
+        bytes: slice.length,
         elapsedMs: sw.elapsedMilliseconds,
       );
-      return (bytes: body, total: parsed.total);
+      return (bytes: slice, total: parsed.total);
     }
-    if (resp.statusCode == 200 && body.length == range.length) {
-      pool.recordSuccess(
-        url,
-        bytes: body.length,
-        elapsedMs: sw.elapsedMilliseconds,
+    if (resp.statusCode == 200) {
+      final cl = int.tryParse(
+        resp.headers.value(HttpHeaders.contentLengthHeader) ?? '',
       );
-      return (bytes: body, total: fileSize ?? range.endExclusive);
+      if (cl != null && cl > 0) fileSize ??= cl;
+      if (body.length >= range.length && range.start == 0) {
+        pool.recordSuccess(
+          url,
+          bytes: range.length,
+          elapsedMs: sw.elapsedMilliseconds,
+        );
+        return (
+          bytes: body.sublist(0, range.length),
+          total: fileSize ?? cl ?? body.length,
+        );
+      }
     }
     throw StateError('http ${resp.statusCode} len=${body.length}');
+  }
+
+  static Uint8List _sliceCovered(
+    Uint8List body,
+    ContentRangeReply parsed,
+    ByteRange range,
+  ) {
+    final recvStart = parsed.start;
+    final offset = range.start - recvStart;
+    if (offset < 0 || offset >= body.length) {
+      throw StateError('Content-Range $parsed missed $range');
+    }
+    final end = min(offset + range.length, body.length);
+    return Uint8List.sublistView(body, offset, end);
   }
 
   static Future<Uint8List> consolidate(HttpClientResponse resp) async {

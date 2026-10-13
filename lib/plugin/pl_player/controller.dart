@@ -559,6 +559,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   int? _lastTextureId;
   bool _playerReused = false;
   String _stallMediaPath = '';
+  bool _openedViaProxy = false;
+  bool _proxyFallbackScheduled = false;
 
   String get _stallAppScene {
     if (isNativePip.value || _isInInAppPip || isPipMode) return 'pip';
@@ -1221,6 +1223,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (Platform.isAndroid) {
       // Avoid sizing the surface using mpv's idle window between media loads.
       player.setProperty('force-window', 'no');
+      // Comma-separated lavf AVOptions. Do NOT put this in Media extras:
+      // media_kit splits extras on commas and ffmpeg then sees
+      // reconnect=0:http_persistent=0 as one boolean.
+      try {
+        player.setProperty(
+          'stream-lavf-o',
+          'reconnect=0,http_persistent=0',
+        );
+      } catch (_) {}
     }
 
     player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
@@ -1273,6 +1284,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     };
 
     var playSource = dataSource;
+    _openedViaProxy = false;
     if (!isLive &&
         playSource is NetworkSource &&
         Pref.vodMultiConnProxy &&
@@ -1281,6 +1293,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         final wrapped = await VodHttpProxy.instance.wrap(playSource);
         if (wrapped != null) {
           playSource = wrapped;
+          _openedViaProxy = true;
+          _proxyFallbackScheduled = false;
+          _armProxyOpenWatchdog();
         }
       } catch (e) {
         VideoStallLog.proxy('wrap-failed $e');
@@ -1506,6 +1521,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           }
           return;
         }
+        if (_openedViaProxy &&
+            (event.contains('127.0.0.1') ||
+                event.contains('Failed to open http://'))) {
+          _scheduleProxyFallback('player-error $event');
+          return;
+        }
         if (event.startsWith("Failed to open https://") ||
             event.startsWith("Can not open external file https://") ||
             //tcp: ffurl_read returned 0xdfb9b0bb
@@ -1644,6 +1665,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         text.contains('Attempting next decoding method')) {
       VideoStallLog.hwdecFallback('${log.prefix}: $text');
     }
+    if (_openedViaProxy &&
+        (text.contains('Could not open source file') ||
+            text.contains('Failed to open http://127.0.0.1') ||
+            text.contains('Failed to open http://[::1]'))) {
+      _scheduleProxyFallback('mpv-open-fail ${log.prefix}');
+    }
   }
 
   VideoStallSnapshot _readVideoStallSnapshot(NativePlayer player) {
@@ -1776,6 +1803,38 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }
     } finally {
       _videoStallRecovering = false;
+    }
+  }
+
+  Timer? _proxyOpenWatchdog;
+
+  void _armProxyOpenWatchdog() {
+    _proxyOpenWatchdog?.cancel();
+    _proxyOpenWatchdog = Timer(const Duration(seconds: 5), () {
+      if (!_openedViaProxy || _proxyFallbackScheduled) return;
+      if (VodHttpProxy.instance.requestsServed > 0) return;
+      _scheduleProxyFallback('no-proxy-request');
+    });
+  }
+
+  void _scheduleProxyFallback(String reason) {
+    if (_proxyFallbackScheduled || !_openedViaProxy || isLive) return;
+    _proxyFallbackScheduled = true;
+    _proxyOpenWatchdog?.cancel();
+    VideoStallLog.proxy('fallback-direct reason=$reason');
+    unawaited(_fallbackProxyToDirect());
+  }
+
+  Future<void> _fallbackProxyToDirect() async {
+    if (_playerCount == 0) return;
+    VodHttpProxy.instance.forceDirectOnce();
+    _openedViaProxy = false;
+    try {
+      final pos = _videoPlayerController?.state.position;
+      await _createVideoController(dataSource, pos, null);
+      await _initializePlayer();
+    } catch (e) {
+      VideoStallLog.proxy('fallback-direct-failed $e');
     }
   }
 

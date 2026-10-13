@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:io';
 
+import 'package:PiliPlus/build_config.dart';
 import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:flutter/foundation.dart';
@@ -212,7 +213,8 @@ class VideoStallSnapshot {
     final path = mediaPath.length > 160
         ? '${mediaPath.substring(0, 160)}…'
         : mediaPath;
-    return 'playing=$playing status=${playerStatus.name} '
+    return 'build=${BuildConfig.buildId} '
+        'playing=$playing status=${playerStatus.name} '
         'buffering=$isBuffering seeking=$isSeeking audioOnly=$onlyPlayAudio '
         'live=$isLive scene=$appScene reusedPlayer=$playerReused '
         'armed=$isArmed autoRecover=$autoRecover verbose=$verboseLog '
@@ -533,9 +535,13 @@ abstract final class VideoStallLog {
     required String text,
   }) => _log('MPV $level $prefix: $text');
 
+  /// Tests can disable disk I/O (path_provider hangs without a plugin).
+  static bool persistToDisk = true;
+
   static void _log(String message) {
     developer.log(message, name: kVideoStallLogTag);
     debugPrint('[$kVideoStallLogTag] $message');
+    if (!persistToDisk) return;
     _pending.add('${DateTime.now().toIso8601String()} $message');
     unawaited(_flush());
   }
@@ -550,9 +556,9 @@ abstract final class VideoStallLog {
       await _flush();
       final file = await logFile();
       if (!file.existsSync()) {
-        return '[$kVideoStallLogTag] no freeze log yet';
+        return 'build=${BuildConfig.buildId}\n[$kVideoStallLogTag] no freeze log yet';
       }
-      return file.readAsStringSync();
+      return 'build=${BuildConfig.buildId}\n${file.readAsStringSync()}';
     } catch (e) {
       return '[$kVideoStallLogTag] read failed: $e';
     }
@@ -569,20 +575,18 @@ abstract final class VideoStallLog {
   }
 
   static Future<void> _flush() async {
-    if (_flushing || _pending.isEmpty) return;
+    if (!persistToDisk || _flushing || _pending.isEmpty) return;
     _flushing = true;
     try {
-      final file = await logFile();
+      final file = await logFile().timeout(const Duration(milliseconds: 400));
       final chunk = '${_pending.join('\n')}\n';
       _pending.clear();
       await file.writeAsString(chunk, mode: FileMode.append, flush: true);
     } catch (_) {
-      // Tests / missing path_provider must not crash playback.
+      // Missing path_provider must not spin or crash playback.
+      _pending.clear();
     } finally {
       _flushing = false;
-      if (_pending.isNotEmpty) {
-        unawaited(_flush());
-      }
     }
   }
 }

@@ -65,14 +65,14 @@ class VodHostPool {
         ? open
         : open.where((h) => h.host != avoidHost).toList();
     final pool = usable.isEmpty ? open : usable;
-    pool.sort((a, b) {
-      final speed = b.emaBps.compareTo(a.emaBps);
-      if (speed != 0) return speed;
-      return a.errors.compareTo(b.errors);
-    });
-    if (pool.first.emaBps <= 0) {
-      return pool[_rotate++ % pool.length].url;
+    if (pool.any((h) => h.emaBps > 0)) {
+      pool.sort((a, b) {
+        final speed = b.emaBps.compareTo(a.emaBps);
+        if (speed != 0) return speed;
+        return a.errors.compareTo(b.errors);
+      });
     }
+    // Keep the original host first until something is actually faster.
     return pool.first.url;
   }
 

@@ -1387,9 +1387,8 @@ abstract final class Pref {
       'demuxer-hysteresis-secs': (bufSec / 1.5).toStringAsFixed(3),
       'demuxer-max-bytes': bufSiz,
       'demuxer-max-back-bytes': bufSiz,
-      // media_kit extras split on commas, so lavf AVOptions use colons.
-      // This ffmpeg build only knows reconnect / http_persistent.
-      'stream-lavf-o': 'reconnect=0:http_persistent=0',
+      // Only options without commas: media_kit extras split on ','.
+      // stream-lavf-o is set via player.setProperty instead.
       'demuxer-lavf-o': 'fflags=+discardcorrupt',
     };
   }

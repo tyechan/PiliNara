@@ -19,10 +19,33 @@ class VodHttpProxy {
   final Map<String, VodSession> _sessions = {};
   int _seq = 0;
   String? _generation;
+  bool _forceDirectOnce = false;
+  DateTime? lastRequestAt;
+  int requestsServed = 0;
 
   bool get isRunning => _server != null && port != null;
 
   bool get hasActiveSession => _sessions.isNotEmpty;
+
+  void forceDirectOnce() {
+    _forceDirectOnce = true;
+  }
+
+  Future<void> resetForTest() async {
+    for (final session in _sessions.values) {
+      session.close();
+    }
+    _sessions.clear();
+    _generation = null;
+    _seq = 0;
+    _forceDirectOnce = false;
+    requestsServed = 0;
+    lastRequestAt = null;
+    final server = _server;
+    _server = null;
+    port = null;
+    await server?.close(force: true);
+  }
 
   String? get preferredHost =>
       _sessions.isEmpty ? null : _sessions.values.first.pool.preferred?.host;
@@ -37,9 +60,17 @@ class VodHttpProxy {
       server.listen((request) {
         unawaited(_handle(request));
       });
+      var threads = 6;
+      var chunkKb = 512;
+      var windowMb = 32;
+      try {
+        threads = Pref.vodMultiConnThreads;
+        chunkKb = Pref.vodMultiConnChunkKb;
+        windowMb = Pref.vodMultiConnWindowMb;
+      } catch (_) {}
       VideoStallLog.proxy(
-        'listen 127.0.0.1:$port threads=${Pref.vodMultiConnThreads} '
-        'chunk=${Pref.vodMultiConnChunkKb}KB window=${Pref.vodMultiConnWindowMb}MB',
+        'listen 127.0.0.1:$port threads=$threads '
+        'chunk=${chunkKb}KB window=${windowMb}MB',
       );
       return true;
     } catch (e) {
@@ -51,24 +82,52 @@ class VodHttpProxy {
   }
 
   Future<NetworkSource?> wrap(NetworkSource source) async {
+    if (_forceDirectOnce) {
+      _forceDirectOnce = false;
+      VideoStallLog.proxy('wrap-skip force-direct');
+      return null;
+    }
     if (source.videoSource.startsWith('edl://') ||
         source.videoSource.startsWith('http://127.0.0.1')) {
       return null;
     }
     if (!await ensureStarted()) return null;
     _dropStale(source.videoSource);
-    final video = _open(
+    final videoId = _register(
       kind: 'video',
       primary: source.videoSource,
       extras: source.videoCandidates,
     );
+    try {
+      await _sessions[videoId]!.ensureSize();
+    } catch (e) {
+      VideoStallLog.proxy('probe-failed video $e — using direct URL');
+      _sessions[videoId]?.close();
+      _sessions.remove(videoId);
+      return null;
+    }
     String? audio;
     if (source.audioSource case final a? when a.isNotEmpty) {
-      audio = _open(kind: 'audio', primary: a, extras: source.audioCandidates);
+      final audioId = _register(
+        kind: 'audio',
+        primary: a,
+        extras: source.audioCandidates,
+      );
+      try {
+        await _sessions[audioId]!.ensureSize();
+        audio = _url(audioId);
+      } catch (e) {
+        VideoStallLog.proxy('probe-failed audio $e — using direct audio');
+        _sessions[audioId]?.close();
+        _sessions.remove(audioId);
+        audio = a;
+      }
     }
+    final video = _url(videoId);
     VideoStallLog.proxy(
       'wrap video=$video audio=${audio ?? '-'} '
-      'srcHost=${Uri.tryParse(source.videoSource)?.host ?? '-'}',
+      'srcHost=${Uri.tryParse(source.videoSource)?.host ?? '-'} '
+      'size=${_sessions[videoId]?.fileSize ?? -1}',
     );
     return NetworkSource(
       videoSource: video,
@@ -76,6 +135,34 @@ class VodHttpProxy {
       videoCandidates: source.videoCandidates,
       audioCandidates: source.audioCandidates,
     );
+  }
+
+  /// Test helper: register one upstream URL and return the loopback URL.
+  Future<String?> openRaw(
+    String primary, {
+    String kind = 'video',
+    int chunkSize = 512 * 1024,
+    int windowBytes = 8 * 1024 * 1024,
+    int workers = 4,
+  }) async {
+    if (!await ensureStarted()) return null;
+    final id = _register(
+      kind: kind,
+      primary: primary,
+      extras: const [],
+      chunkSize: chunkSize,
+      windowBytes: windowBytes,
+      workers: workers,
+    );
+    try {
+      await _sessions[id]!.ensureSize();
+    } catch (e) {
+      VideoStallLog.proxy('openRaw-probe-failed $e');
+      _sessions[id]?.close();
+      _sessions.remove(id);
+      return null;
+    }
+    return _url(id);
   }
 
   void _dropStale(String videoPrimary) {
@@ -88,23 +175,52 @@ class VodHttpProxy {
     _generation = gen;
   }
 
-  String _open({
+  String _register({
     required String kind,
     required String primary,
     required List<String> extras,
+    int? chunkSize,
+    int? windowBytes,
+    int? workers,
   }) {
     final id = '$kind${++_seq}';
     final candidates = VodHostPool.buildCandidates(primary, extras: extras);
+    int fallbackChunk() {
+      try {
+        return Pref.vodMultiConnChunkKb * 1024;
+      } catch (_) {
+        return 512 * 1024;
+      }
+    }
+
+    int fallbackWindow() {
+      try {
+        return Pref.vodMultiConnWindowMb * 1024 * 1024;
+      } catch (_) {
+        return 32 * 1024 * 1024;
+      }
+    }
+
+    int fallbackWorkers() {
+      try {
+        return Pref.vodMultiConnThreads.clamp(1, 16);
+      } catch (_) {
+        return 4;
+      }
+    }
+
     _sessions[id] = VodSession(
       id: id,
       kind: kind,
-      candidates: candidates,
-      chunkSize: Pref.vodMultiConnChunkKb * 1024,
-      windowBytes: Pref.vodMultiConnWindowMb * 1024 * 1024,
-      workers: Pref.vodMultiConnThreads.clamp(1, 16),
+      candidates: candidates.isEmpty ? [primary] : candidates,
+      chunkSize: chunkSize ?? fallbackChunk(),
+      windowBytes: windowBytes ?? fallbackWindow(),
+      workers: workers ?? fallbackWorkers(),
     );
-    return 'http://127.0.0.1:$port/$id';
+    return id;
   }
+
+  String _url(String id) => 'http://127.0.0.1:$port/$id';
 
   bool preferNextHost() {
     var any = false;
@@ -132,9 +248,10 @@ class VodHttpProxy {
         await response.close();
         return;
       }
-      final parsed = HttpRangeRequest.parse(
-        request.headers.value(HttpHeaders.rangeHeader),
-      );
+      lastRequestAt = DateTime.now();
+      requestsServed++;
+      final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+      final parsed = HttpRangeRequest.parse(rangeHeader);
       final range = (parsed ?? const HttpRangeRequest(start: 0)).resolve(size);
       if (range.length <= 0) {
         response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
@@ -143,16 +260,25 @@ class VodHttpProxy {
         return;
       }
 
-      response.statusCode = HttpStatus.partialContent;
+      final hasRange = parsed != null;
+      response.statusCode = hasRange
+          ? HttpStatus.partialContent
+          : HttpStatus.ok;
       response.headers.chunkedTransferEncoding = false;
       response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
       response.headers.set(HttpHeaders.contentTypeHeader, 'video/mp4');
-      response.headers.set(
-        HttpHeaders.contentRangeHeader,
-        'bytes ${range.start}-${range.endInclusive}/$size',
-      );
+      if (hasRange) {
+        response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes ${range.start}-${range.endInclusive}/$size',
+        );
+      }
       response.headers.contentLength = range.length;
-      response.bufferOutput = true;
+      response.bufferOutput = false;
+      VideoStallLog.proxy(
+        'req id=$id method=${request.method} range=${rangeHeader ?? '-'} '
+        'status=${response.statusCode} bytes=${range.length}',
+      );
 
       if (request.method == 'HEAD') {
         await response.close();
@@ -165,9 +291,10 @@ class VodHttpProxy {
       }
       await response.close();
     } catch (e) {
+      VideoStallLog.proxy('req-fail ${request.uri.path} $e');
       try {
-        if (response.headers.contentLength == -1 &&
-            response.statusCode == HttpStatus.ok) {
+        if (!response.headers.chunkedTransferEncoding &&
+            response.contentLength == 0) {
           response.statusCode = HttpStatus.badGateway;
         }
         await response.close();

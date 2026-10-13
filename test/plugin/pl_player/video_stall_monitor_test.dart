@@ -345,6 +345,7 @@ void main() {
 
     final playing = monitor.observe(_snap());
     expect(playing.logStart, isTrue);
+    expect(_snap().toLogLine(), contains('build='));
 
     final again = monitor.observe(
       _snap(timePos: 11, videoPts: 11, audioPts: 11),

@@ -66,6 +66,14 @@ void main() {
     test('rejects a range that overruns the total', () {
       expect(ContentRangeReply.parse('bytes 0-99/50'), isNull);
     });
+
+    test('covers a wider CDN window than the request', () {
+      final parsed = ContentRangeReply.parse('bytes 0-4095/38872044');
+      expect(parsed!.covers(start: 0, endInclusive: 0), isTrue);
+      expect(parsed.covers(start: 0, endInclusive: 4095), isTrue);
+      expect(parsed.covers(start: 100, endInclusive: 200), isTrue);
+      expect(parsed.covers(start: 4096, endInclusive: 5000), isFalse);
+    });
   });
 
   test('parsePlayurlDeadline reads the query param', () {

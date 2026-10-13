@@ -103,6 +103,12 @@ class ContentRangeReply {
   bool matches({required int start, required int endInclusive}) {
     return this.start == start && this.endInclusive == endInclusive;
   }
+
+  /// True when the reply contains every byte we asked for (CDNs often
+  /// return a wider aligned window than the request).
+  bool covers({required int start, required int endInclusive}) {
+    return this.start <= start && this.endInclusive >= endInclusive;
+  }
 }
 
 List<ByteRange> splitRanges(int start, int endExclusive, int chunkSize) {
