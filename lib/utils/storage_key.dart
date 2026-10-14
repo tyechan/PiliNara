@@ -204,7 +204,8 @@ abstract final class SettingBoxKey {
       liveStream = 'liveStream',
       enableDocProvider = 'enableDocProvider',
       enableEmoteTooltip = 'enableEmoteTooltip',
-      mineTabs = 'mineTabs';
+      mineTabs = 'mineTabs',
+      buvid = 'buvid';
 
   static const String enableAiChat = 'enableAiChat',
       aiApiUrl = 'aiApiUrl',
