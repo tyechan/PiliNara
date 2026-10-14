@@ -213,27 +213,12 @@ List<SettingsModel> get videoSettings => [
   NormalModel(
     title: '硬解模式',
     leading: const Icon(Icons.memory_outlined),
-    getSubtitle: () =>
-        '当前：${Pref.hardwareDecoding}（mpv --hwdec；Android 默认 mediacodec-copy，避免直通硬解有声无画）',
+    getSubtitle: () => '当前：${Pref.hardwareDecoding}（此项即mpv的--hwdec）',
     onTap: _showHwDecDialog,
   ),
   const SwitchModel(
-    title: '画面冻结自动恢复',
-    subtitle: '检测到有声无画、视频轨 EOF 或 NAL 损坏时自动重开（可换 CDN）。抓「纯冻结」日志时请关掉',
-    leading: Icon(Icons.healing_outlined),
-    setKey: SettingBoxKey.videoStallAutoRecover,
-    defaultVal: true,
-  ),
-  const SwitchModel(
-    title: '画面冻结详细日志',
-    subtitle: '提高 mpv 日志级别，每 5 秒写 TICK（含 vfFps/avsync）。抓冻结时请打开，并关掉「自动恢复」',
-    leading: Icon(Icons.bug_report_outlined),
-    setKey: SettingBoxKey.videoStallVerboseLog,
-    defaultVal: true,
-  ),
-  const SwitchModel(
     title: '多线程加速（实验）',
-    subtitle: '点播经本机代理，按 Range 并行从多个大陆 CDN 拉流。海外线路卡顿/冻结时可开。失败则回退直连',
+    subtitle: '点播经本机代理，按 Range 并行从多个大陆 CDN 拉流。海外线路卡顿时可开。失败则回退直连',
     leading: Icon(Icons.speed_outlined),
     setKey: SettingBoxKey.vodMultiConnProxy,
     defaultVal: true,

@@ -20,8 +20,6 @@ abstract final class SettingBoxKey {
       hardwareDecoding = 'hardwareDecoding',
       videoSync = 'videoSync',
       autosync = 'autosync',
-      videoStallAutoRecover = 'videoStallAutoRecover',
-      videoStallVerboseLog = 'videoStallVerboseLog',
       vodMultiConnProxy = 'vodMultiConnProxy',
       vodMultiConnThreads = 'vodMultiConnThreads',
       vodMultiConnWindowMb = 'vodMultiConnWindowMb',

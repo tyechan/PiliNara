@@ -3,7 +3,6 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:PiliPlus/plugin/pl_player/utils/video_stall_monitor.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -115,10 +114,6 @@ Future<void> _run(String exe, List<String> args) async {
 void main() {
   setUpAll(() {
     HttpOverrides.global = null;
-    VideoStallLog.persistToDisk = false;
-  });
-  tearDownAll(() {
-    VideoStallLog.persistToDisk = true;
   });
 
   late Uint8List payload;

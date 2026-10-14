@@ -28,12 +28,11 @@ import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/speed_lock_hint.dart';
-import 'package:PiliPlus/plugin/pl_player/models/hwdec_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
-import 'package:PiliPlus/plugin/pl_player/utils/video_stall_monitor.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/services/live_pip_overlay_service.dart';
 import 'package:PiliPlus/services/pip_overlay_service.dart';
 import 'package:PiliPlus/services/service_locator.dart';
@@ -552,27 +551,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool enableHeart = true;
   late final String? hwdec = Pref.enableHA ? Pref.hardwareDecoding : null;
 
-  /// Android-only: detect video PTS stall while audio/clock keeps moving.
-  final VideoStallMonitor _videoStallMonitor = VideoStallMonitor();
-  Timer? _videoStallPollTimer;
-  bool _videoStallRecovering = false;
-  int? _lastTextureId;
-  bool _playerReused = false;
-  String _stallMediaPath = '';
   bool _openedViaProxy = false;
   bool _proxyFallbackScheduled = false;
-
-  String get _stallAppScene {
-    if (isNativePip.value || _isInInAppPip || isPipMode) return 'pip';
-    switch (_lastAppLifecycleState) {
-      case AppLifecycleState.paused:
-      case AppLifecycleState.hidden:
-      case AppLifecycleState.detached:
-        return 'background';
-      default:
-        return 'foreground';
-    }
-  }
+  Timer? _proxyOpenWatchdog;
 
   late final progressType = Pref.btmProgressBehavior;
   late final enableQuickDouble = Pref.enableQuickDouble;
@@ -1202,9 +1183,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     final player = await Player.create(
       configuration: PlayerConfiguration(
-        logLevel: Pref.videoStallVerboseLog
-            ? .debug
-            : ((kDebugMode || Pref.enableLog) ? .warn : .error),
+        logLevel: (kDebugMode || Pref.enableLog) ? .warn : .error,
         options: opt,
       ),
     );
@@ -1257,7 +1236,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     danmakuController?.clear();
 
     var player = _videoPlayerController;
-    _playerReused = player != null;
 
     if (player == null) {
       player = await _initPlayer();
@@ -1298,7 +1276,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _armProxyOpenWatchdog();
         }
       } catch (e) {
-        VideoStallLog.proxy('wrap-failed $e');
+        VodProxyLog.log('wrap-failed $e');
       }
     }
 
@@ -1326,8 +1304,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       play: false,
     );
     applyVideoPictureParameters(player);
-    _stallMediaPath = video;
-    _videoStallMonitor.resetForNewMedia();
   }
 
   Future<void>? refreshPlayer() {
@@ -1480,29 +1456,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           _updatePlaybackState();
         }
       }),
-      if (kDebugMode || Pref.enableLog || Pref.videoStallVerboseLog)
+      if (kDebugMode || Pref.enableLog)
         stream.log.listen((PlayerLog log) {
           final level = log.level.toLowerCase();
-          final isError = level == 'error' || level == 'fatal';
-          if (isError) {
-            VideoStallLog.mpv(
-              level: log.level,
-              prefix: log.prefix,
-              text: log.text,
-            );
+          if (level == 'error' || level == 'fatal') {
             Utils.reportError(
               '${log.level}: ${log.prefix}: ${log.text}\n${player.state.playlist}',
               null,
             );
-          } else if (Platform.isAndroid && _shouldForwardMpvLog(log)) {
-            VideoStallLog.mpv(
-              level: log.level,
-              prefix: log.prefix,
-              text: log.text,
-            );
           }
           if (Platform.isAndroid) {
-            _noteMpvLogForStall(log);
+            _noteMpvLogForProxy(log);
           }
           if (kDebugMode) {
             debugPrint(log.toString());
@@ -1574,97 +1538,18 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         }
       }),
     ];
-    _startVideoStallMonitor(player);
   }
 
   /// 移除事件监听
   void _removeListeners() {
-    _stopVideoStallMonitor();
+    _proxyOpenWatchdog?.cancel();
     _subscriptions?.forEach((e) => e.cancel());
     _subscriptions?.clear();
     _subscriptions = null;
   }
 
-  void _startVideoStallMonitor(NativePlayer player) {
-    _stopVideoStallMonitor();
-    if (!Platform.isAndroid) return;
-
-    _lastTextureId = _videoController?.id.value;
-    _videoController?.id.addListener(_onVideoTextureId);
-    _videoStallPollTimer = Timer.periodic(kVideoStallPollInterval, (_) {
-      _pollVideoStall(player);
-    });
-  }
-
-  void _stopVideoStallMonitor() {
-    _videoStallPollTimer?.cancel();
-    _videoStallPollTimer = null;
-    _videoController?.id.removeListener(_onVideoTextureId);
-    _videoStallRecovering = false;
-  }
-
-  void _onVideoTextureId() {
-    final id = _videoController?.id.value;
-    if (id == _lastTextureId) return;
-    VideoStallLog.surface(from: _lastTextureId, to: id);
-    _lastTextureId = id;
-  }
-
-  String _mpvProperty(NativePlayer player, String name) {
-    try {
-      return player.getProperty(name);
-    } catch (_) {
-      return '';
-    }
-  }
-
-  /// Always keep warn/error. With the verbose toggle, also keep vd/vo/hwdec
-  /// plus cplayer/cache/demux so pause/exit/cache events show in the export.
-  static bool _shouldForwardMpvLog(PlayerLog log) {
-    final level = log.level.toLowerCase();
-    if (level == 'error' ||
-        level == 'fatal' ||
-        level == 'warn' ||
-        level == 'warning') {
-      return true;
-    }
-    if (!Pref.videoStallVerboseLog) return false;
-    final prefix = log.prefix.toLowerCase();
-    return prefix.startsWith('vd') ||
-        prefix.startsWith('vo') ||
-        prefix.startsWith('vf') ||
-        prefix.startsWith('ad') ||
-        prefix.startsWith('ao') ||
-        prefix.startsWith('cplayer') ||
-        prefix.startsWith('cache') ||
-        prefix.startsWith('demux') ||
-        prefix.contains('hwdec') ||
-        prefix.contains('mediacodec') ||
-        prefix.contains('ffmpeg') ||
-        prefix.contains('decode') ||
-        prefix.contains('timeline');
-  }
-
-  void _noteMpvLogForStall(PlayerLog log) {
+  void _noteMpvLogForProxy(PlayerLog log) {
     final text = log.text;
-    if (text.contains('Error while decoding frame') ||
-        text.contains('Too many packets in the demuxer') ||
-        text.contains('Invalid NAL unit size') ||
-        text.contains('missing picture in access unit') ||
-        text.contains('Error splitting the input into NAL units')) {
-      _videoStallMonitor.noteDecoderFault();
-    }
-    // `EOF code: 4` also fires on stop/loadfile. Only the video-track EOF
-    // (and vf filter input EOF) means the picture died while audio continues.
-    final prefix = log.prefix.toLowerCase();
-    if (text.contains('video EOF (status=') ||
-        (prefix.startsWith('vf') && text.contains('filter input EOF'))) {
-      _videoStallMonitor.noteVideoEof();
-    }
-    if (text.contains('Using software decoding') ||
-        text.contains('Attempting next decoding method')) {
-      VideoStallLog.hwdecFallback('${log.prefix}: $text');
-    }
     if (_openedViaProxy &&
         (text.contains('Could not open source file') ||
             text.contains('Failed to open http://127.0.0.1') ||
@@ -1672,141 +1557,6 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       _scheduleProxyFallback('mpv-open-fail ${log.prefix}');
     }
   }
-
-  VideoStallSnapshot _readVideoStallSnapshot(NativePlayer player) {
-    double? asDouble(String name) {
-      var raw = _mpvProperty(player, name).trim();
-      if (raw.startsWith('+')) raw = raw.substring(1);
-      return double.tryParse(raw);
-    }
-
-    int? asInt(String name) => int.tryParse(_mpvProperty(player, name).trim());
-    final state = player.state;
-    return VideoStallSnapshot(
-      playerStatus: playerStatus,
-      playing: state.playing,
-      isBuffering: isBuffering.value,
-      isSeeking: isSeeking.value,
-      onlyPlayAudio: onlyPlayAudio.value,
-      isLive: isLive,
-      timePos: asDouble('time-pos'),
-      videoPts: asDouble('video-pts'),
-      audioPts: asDouble('audio-pts'),
-      estimatedVfFps: asDouble('estimated-vf-fps'),
-      dropFrameCount: asInt('frame-drop-count') ?? asInt('drop-frame-count'),
-      voDropFrameCount: asInt('vo-drop-frame-count'),
-      voDelayedFrameCount: asInt('vo-delayed-frame-count'),
-      hwdec: hwdec ?? 'no',
-      hwdecCurrent: _mpvProperty(player, 'hwdec-current'),
-      vo: _mpvProperty(player, 'current-vo'),
-      videoFormat: _mpvProperty(player, 'video-format'),
-      videoCodec: _mpvProperty(player, 'video-codec'),
-      audioCodec: _mpvProperty(player, 'audio-codec'),
-      vid: _mpvProperty(player, 'vid'),
-      pausedForCache: _mpvProperty(player, 'paused-for-cache'),
-      coreIdle: _mpvProperty(player, 'core-idle'),
-      speed: asDouble('speed') ?? state.rate,
-      videoSync: _mpvProperty(player, 'video-sync'),
-      textureId: _videoController?.id.value,
-      width: state.width,
-      height: state.height,
-      decoderFrameDropCount: asInt('decoder-frame-drop-count'),
-      containerFps: asDouble('container-fps'),
-      cacheUsed: _mpvProperty(player, 'cache-used'),
-      demuxerCacheDuration: _mpvProperty(player, 'demuxer-cache-duration'),
-      bufferedSec: buffered.value,
-      playerReused: _playerReused,
-      mediaPath: _stallMediaPath,
-      appScene: _stallAppScene,
-      avsync: _mpvProperty(player, 'avsync'),
-      videoBitrate: _mpvProperty(player, 'packet-video-bitrate'),
-      decoderFaultCount: _videoStallMonitor.takeDecoderFaults(),
-      autoRecover: Pref.videoStallAutoRecover,
-      verboseLog: Pref.videoStallVerboseLog,
-      estimatedFrameNumber:
-          asInt('frame-number') ?? asInt('estimated-frame-number'),
-      durationSec:
-          asDouble('duration') ??
-          (state.duration > Duration.zero
-              ? state.duration.inMilliseconds / 1000.0
-              : null),
-      videoEof: _videoStallMonitor.videoEofSticky,
-      faultWindow: _videoStallMonitor.decoderFaultWindow,
-    );
-  }
-
-  void _pollVideoStall(NativePlayer player) {
-    if (_playerCount == 0 || _videoStallRecovering) return;
-    try {
-      final snap = _readVideoStallSnapshot(player);
-      final result = _videoStallMonitor.observe(snap);
-      if (result.logStart) {
-        VideoStallLog.start(snap);
-      }
-      if (result.logTick) {
-        VideoStallLog.tick(snap);
-      }
-      if (result.logPause) {
-        VideoStallLog.pause(snap);
-      }
-      if (result.isStalled) {
-        VideoStallLog.stall(
-          snap,
-          recoveries: _videoStallMonitor.recoveries,
-          reasons: result.reasons,
-        );
-      }
-      if (result.recovery case final action?) {
-        if (Pref.videoStallAutoRecover) {
-          unawaited(_recoverVideoStall(player, action, snap));
-        } else {
-          VideoStallLog.recoverySkipped(snap);
-        }
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('[$kVideoStallLogTag] poll failed: $e');
-      }
-    }
-  }
-
-  Future<void> _recoverVideoStall(
-    NativePlayer player,
-    VideoStallRecoveryAction action,
-    VideoStallSnapshot snap,
-  ) async {
-    if (_videoStallRecovering || _playerCount == 0) return;
-    _videoStallRecovering = true;
-    _videoStallMonitor.clearAfterRecovery();
-    VideoStallLog.recovery(action, snap);
-    try {
-      switch (action) {
-        case VideoStallRecoveryAction.seekFlush:
-          await player.seek(player.state.position);
-        case VideoStallRecoveryAction.switchToCopyHwdec:
-          try {
-            player.setProperty('hwdec', HwDecType.mediacodecCopy.hwdec);
-          } catch (_) {}
-          await player.seek(player.state.position);
-        case VideoStallRecoveryAction.reopen:
-          if (onNeedsPlayerInit != null) {
-            await onNeedsPlayerInit!();
-          } else {
-            await refreshPlayer();
-          }
-        case VideoStallRecoveryAction.reopenFreshUrl:
-          await _reopenWithRotatedCdn(player);
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('[$kVideoStallLogTag] recovery ${action.name} failed: $e');
-      }
-    } finally {
-      _videoStallRecovering = false;
-    }
-  }
-
-  Timer? _proxyOpenWatchdog;
 
   void _armProxyOpenWatchdog() {
     _proxyOpenWatchdog?.cancel();
@@ -1821,7 +1571,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (_proxyFallbackScheduled || !_openedViaProxy || isLive) return;
     _proxyFallbackScheduled = true;
     _proxyOpenWatchdog?.cancel();
-    VideoStallLog.proxy('fallback-direct reason=$reason');
+    VodProxyLog.log('fallback-direct reason=$reason');
     unawaited(_fallbackProxyToDirect());
   }
 
@@ -1834,52 +1584,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       await _createVideoController(dataSource, pos, null);
       await _initializePlayer();
     } catch (e) {
-      VideoStallLog.proxy('fallback-direct-failed $e');
+      VodProxyLog.log('fallback-direct-failed $e');
     }
-  }
-
-  Future<void> _reopenWithRotatedCdn(NativePlayer player) async {
-    final pos = player.state.position;
-    if (VodHttpProxy.instance.hasActiveSession &&
-        VodHttpProxy.instance.preferNextHost()) {
-      VideoStallLog.cdnRotate(
-        from: 'proxy',
-        to: VodHttpProxy.instance.preferredHost ?? '-',
-      );
-      await refreshPlayer();
-      return;
-    }
-    if (_applyVideoCdnRotate()) {
-      await _createVideoController(dataSource, pos, null);
-      await _initializePlayer();
-      return;
-    }
-    if (onNeedsPlayerInit != null) {
-      await onNeedsPlayerInit!();
-      return;
-    }
-    await refreshPlayer();
-  }
-
-  bool _applyVideoCdnRotate() {
-    final src = dataSource;
-    if (src is! NetworkSource) return false;
-    final rotated = VideoUtils.rotateMediaHost(src.videoSource);
-    if (rotated == src.videoSource) return false;
-    String fromHost = src.videoSource;
-    String toHost = rotated;
-    try {
-      fromHost = Uri.parse(src.videoSource).host;
-      toHost = Uri.parse(rotated).host;
-    } catch (_) {}
-    VideoStallLog.cdnRotate(from: fromHost, to: toHost);
-    dataSource = NetworkSource(
-      videoSource: rotated,
-      audioSource: src.audioSource,
-      videoCandidates: src.videoCandidates,
-      audioCandidates: src.audioCandidates,
-    );
-    return true;
   }
 
   void _cancelSubForSeek() {

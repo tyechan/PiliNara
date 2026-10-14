@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
-import 'package:PiliPlus/plugin/pl_player/utils/video_stall_monitor.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_session.dart';
@@ -68,13 +68,13 @@ class VodHttpProxy {
         chunkKb = Pref.vodMultiConnChunkKb;
         windowMb = Pref.vodMultiConnWindowMb;
       } catch (_) {}
-      VideoStallLog.proxy(
+      VodProxyLog.log(
         'listen 127.0.0.1:$port threads=$threads '
         'chunk=${chunkKb}KB window=${windowMb}MB',
       );
       return true;
     } catch (e) {
-      VideoStallLog.proxy('listen-failed $e');
+      VodProxyLog.log('listen-failed $e');
       _server = null;
       port = null;
       return false;
@@ -84,7 +84,7 @@ class VodHttpProxy {
   Future<NetworkSource?> wrap(NetworkSource source) async {
     if (_forceDirectOnce) {
       _forceDirectOnce = false;
-      VideoStallLog.proxy('wrap-skip force-direct');
+      VodProxyLog.log('wrap-skip force-direct');
       return null;
     }
     if (source.videoSource.startsWith('edl://') ||
@@ -101,7 +101,7 @@ class VodHttpProxy {
     try {
       await _sessions[videoId]!.ensureSize();
     } catch (e) {
-      VideoStallLog.proxy('probe-failed video $e — using direct URL');
+      VodProxyLog.log('probe-failed video $e — using direct URL');
       _sessions[videoId]?.close();
       _sessions.remove(videoId);
       return null;
@@ -117,14 +117,14 @@ class VodHttpProxy {
         await _sessions[audioId]!.ensureSize();
         audio = _url(audioId);
       } catch (e) {
-        VideoStallLog.proxy('probe-failed audio $e — using direct audio');
+        VodProxyLog.log('probe-failed audio $e — using direct audio');
         _sessions[audioId]?.close();
         _sessions.remove(audioId);
         audio = a;
       }
     }
     final video = _url(videoId);
-    VideoStallLog.proxy(
+    VodProxyLog.log(
       'wrap video=$video audio=${audio ?? '-'} '
       'srcHost=${Uri.tryParse(source.videoSource)?.host ?? '-'} '
       'size=${_sessions[videoId]?.fileSize ?? -1}',
@@ -157,7 +157,7 @@ class VodHttpProxy {
     try {
       await _sessions[id]!.ensureSize();
     } catch (e) {
-      VideoStallLog.proxy('openRaw-probe-failed $e');
+      VodProxyLog.log('openRaw-probe-failed $e');
       _sessions[id]?.close();
       _sessions.remove(id);
       return null;
@@ -275,7 +275,7 @@ class VodHttpProxy {
       }
       response.headers.contentLength = range.length;
       response.bufferOutput = false;
-      VideoStallLog.proxy(
+      VodProxyLog.log(
         'req id=$id method=${request.method} range=${rangeHeader ?? '-'} '
         'status=${response.statusCode} bytes=${range.length}',
       );
@@ -291,7 +291,7 @@ class VodHttpProxy {
       }
       await response.close();
     } catch (e) {
-      VideoStallLog.proxy('req-fail ${request.uri.path} $e');
+      VodProxyLog.log('req-fail ${request.uri.path} $e');
       try {
         if (!response.headers.chunkedTransferEncoding &&
             response.contentLength == 0) {

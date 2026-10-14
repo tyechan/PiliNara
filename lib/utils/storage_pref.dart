@@ -1109,12 +1109,6 @@ abstract final class Pref {
   static bool get enableLog =>
       _setting.get(SettingBoxKey.enableLog, defaultValue: true);
 
-  static bool get videoStallAutoRecover =>
-      _setting.get(SettingBoxKey.videoStallAutoRecover, defaultValue: true);
-
-  static bool get videoStallVerboseLog =>
-      _setting.get(SettingBoxKey.videoStallVerboseLog, defaultValue: true);
-
   static bool get vodMultiConnProxy =>
       _setting.get(SettingBoxKey.vodMultiConnProxy, defaultValue: true);
 

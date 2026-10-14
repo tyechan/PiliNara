@@ -73,6 +73,11 @@ android {
                     value = "PiliPlus dev",
                 )
             }
+            // Testers who installed the 1013 debug APK (`*.debug`) can upgrade
+            // a release-signed-with-debug-keystore build via -PcompatDebugId.
+            if (project.hasProperty("compatDebugId")) {
+                applicationIdSuffix = ".debug"
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

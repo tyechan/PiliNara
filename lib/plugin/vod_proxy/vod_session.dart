@@ -5,7 +5,7 @@ import 'dart:typed_data';
 
 import 'package:PiliPlus/http/browser_ua.dart';
 import 'package:PiliPlus/http/constants.dart';
-import 'package:PiliPlus/plugin/pl_player/utils/video_stall_monitor.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 
@@ -45,7 +45,7 @@ class VodSession {
   void startStats() {
     _statsTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
       if (_closed) return;
-      VideoStallLog.proxy(
+      VodProxyLog.log(
         'stats id=$id kind=$kind served=${_fmtBytes(_bytesServed)} '
         'fetched=${_fmtBytes(_bytesFetched)} ${_throughput()} '
         'ahead=${_fmtBytes(_aheadBytes)} cursor=$_cursor '
@@ -94,12 +94,12 @@ class VodSession {
         probe.bytes.length >= (size > 0 ? min(probeEnd, size) : probeEnd)) {
       // Not a full chunk — drop so _chunk(0) refetches the real slice.
     }
-    VideoStallLog.proxy(
+    VodProxyLog.log(
       'size id=$id kind=$kind bytes=$size '
       'hosts=${pool.hosts.map((h) => h.host).join(",")}',
     );
     if (pool.nearDeadline) {
-      VideoStallLog.proxy('deadline-soon id=$id deadline=${pool.deadlineSec}');
+      VodProxyLog.log('deadline-soon id=$id deadline=${pool.deadlineSec}');
     }
     return size;
   }
@@ -113,7 +113,12 @@ class VodSession {
     var pos = start;
     while (!_closed && pos < endExclusive) {
       final idx = pos ~/ chunkSize;
-      final chunk = await _chunk(idx, urgent: pos == start);
+      final Uint8List chunk;
+      try {
+        chunk = await _chunk(idx, urgent: pos == start);
+      } on _SessionClosed {
+        return;
+      }
       if (_closed) return;
       final offset = pos - idx * chunkSize;
       if (offset >= chunk.length) {
@@ -140,9 +145,17 @@ class VodSession {
       final idx = range.start ~/ chunkSize;
       if (_chunks.containsKey(idx) || _inflight.containsKey(idx)) continue;
       if (_inflight.length >= workers) break;
-      unawaited(_chunk(idx));
+      unawaited(_chunkQuiet(idx));
       launched++;
       if (launched >= workers) break;
+    }
+  }
+
+  Future<void> _chunkQuiet(int idx) async {
+    try {
+      await _chunk(idx);
+    } on _SessionClosed {
+      // Player moved on; in-flight Range work is expected to stop.
     }
   }
 
@@ -150,17 +163,22 @@ class VodSession {
     final cached = _chunks[idx];
     if (cached != null) return Future.value(cached);
     return _inflight.putIfAbsent(idx, () async {
-      final size = fileSize ?? await ensureSize();
-      final start = idx * chunkSize;
-      final end = min(start + chunkSize, size);
-      final fetched = await _fetchRange(
-        ByteRange(start, end),
-        urgent: urgent,
-      );
-      fileSize ??= fetched.total;
-      _chunks[idx] = fetched.bytes;
-      _inflight.remove(idx);
-      return fetched.bytes;
+      try {
+        if (_closed) throw const _SessionClosed();
+        final size = fileSize ?? await ensureSize();
+        if (_closed) throw const _SessionClosed();
+        final start = idx * chunkSize;
+        final end = min(start + chunkSize, size);
+        final fetched = await _fetchRange(
+          ByteRange(start, end),
+          urgent: urgent,
+        );
+        fileSize ??= fetched.total;
+        _chunks[idx] = fetched.bytes;
+        return fetched.bytes;
+      } finally {
+        _inflight.remove(idx);
+      }
     });
   }
 
@@ -171,9 +189,7 @@ class VodSession {
     Object? lastError;
     String? lastHost;
     for (var attempt = 0; attempt < 5; attempt++) {
-      if (_closed) {
-        throw StateError('session closed');
-      }
+      if (_closed) throw const _SessionClosed();
       final url = pool.pickUrl(avoidHost: lastHost);
       if (url == null) break;
       lastHost = Uri.tryParse(url)?.host;
@@ -184,7 +200,7 @@ class VodSession {
         _bytesFetched += result.bytes.length;
         if (result.bytes.length != range.length) {
           pool.recordFailure(url, reason: 'short-read');
-          VideoStallLog.proxy(
+          VodProxyLog.log(
             'retry id=$id range=$range from=$lastHost reason=short-read '
             'got=${result.bytes.length} want=${range.length}',
           );
@@ -198,13 +214,16 @@ class VodSession {
           reason: '403',
           ban: const Duration(seconds: 45),
         );
-        VideoStallLog.proxy(
+        VodProxyLog.log(
           'retry id=$id range=$range from=$lastHost reason=403',
         );
         lastError = _Forbidden();
+      } on _SessionClosed {
+        rethrow;
       } catch (e) {
+        if (_closed) throw const _SessionClosed();
         pool.recordFailure(url, reason: e.toString());
-        VideoStallLog.proxy(
+        VodProxyLog.log(
           'retry id=$id range=$range from=$lastHost reason=$e',
         );
         lastError = e;
@@ -305,7 +324,7 @@ class VodSession {
   bool preferNextHost() {
     final next = pool.preferNext();
     if (next == null) return false;
-    VideoStallLog.proxy('blacklist-rotate id=$id next=$next');
+    VodProxyLog.log('blacklist-rotate id=$id next=$next');
     return true;
   }
 
@@ -320,3 +339,7 @@ class VodSession {
 }
 
 class _Forbidden implements Exception {}
+
+class _SessionClosed implements Exception {
+  const _SessionClosed();
+}
