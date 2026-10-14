@@ -32,14 +32,18 @@ class PipMiniVideoContent extends StatelessWidget {
         ColoredBox(
           color: Colors.black,
           child: Obx(() {
+            // Read Rx first so a missing VideoController does not throw
+            // GetX "improper use of Obx" (grey ErrorWidget over the mini window).
+            final videoFit = plPlayerController.videoFit.value;
+            final flipX = plPlayerController.flipX.value;
+            final flipY = plPlayerController.flipY.value;
             final videoController = plPlayerController.videoController;
             if (videoController == null) {
               return const SizedBox.shrink();
             }
-            final videoFit = plPlayerController.videoFit.value;
             return Transform.flip(
-              flipX: plPlayerController.flipX.value,
-              flipY: plPlayerController.flipY.value,
+              flipX: flipX,
+              flipY: flipY,
               child: FittedBox(
                 fit: videoFit.boxFit,
                 clipBehavior: Clip.hardEdge,
