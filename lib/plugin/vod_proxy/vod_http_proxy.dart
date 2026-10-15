@@ -183,6 +183,8 @@ class VodHttpProxy {
     int chunkSize = 512 * 1024,
     int windowBytes = 8 * 1024 * 1024,
     int workers = 4,
+    Duration? attemptTimeout,
+    Duration? fetchBudget,
   }) async {
     if (!await ensureStarted()) return null;
     final id = _register(
@@ -192,6 +194,8 @@ class VodHttpProxy {
       chunkSize: chunkSize,
       windowBytes: windowBytes,
       workers: workers,
+      attemptTimeout: attemptTimeout,
+      fetchBudget: fetchBudget,
     );
     try {
       await _sessions[id]!.ensureSize();
@@ -211,6 +215,8 @@ class VodHttpProxy {
     int? chunkSize,
     int? windowBytes,
     int? workers,
+    Duration? attemptTimeout,
+    Duration? fetchBudget,
   }) {
     final id = '$kind${++_seq}';
     final candidates = VodHostPool.buildCandidates(primary, extras: extras);
@@ -245,11 +251,22 @@ class VodHttpProxy {
       chunkSize: chunkSize ?? fallbackChunk(),
       windowBytes: windowBytes ?? fallbackWindow(),
       workers: workers ?? fallbackWorkers(),
+      attemptTimeout: attemptTimeout ?? const Duration(seconds: 6),
+      fetchBudget: fetchBudget ?? const Duration(seconds: 45),
     );
     return id;
   }
 
   String _url(String id) => 'http://127.0.0.1:$port/$id';
+
+  static bool _clientGone(Object? e) {
+    if (e == null) return false;
+    final msg = e.toString();
+    return msg.contains('Content size below specified contentLength') ||
+        msg.contains('Broken pipe') ||
+        msg.contains('Connection reset') ||
+        msg.contains('Connection closed');
+  }
 
   bool preferNextHost() {
     var any = false;
@@ -315,12 +332,22 @@ class VodHttpProxy {
       }
 
       await for (final chunk in session.read(range.start, range.endExclusive)) {
+        if (chunk.isEmpty) continue;
         response.add(chunk);
         await response.flush();
       }
       await response.close();
     } catch (e) {
-      VodProxyLog.log('req-fail ${request.uri.path} $e');
+      if (e is VodServeAbort) {
+        VodProxyLog.log(
+          'abort id=${request.uri.pathSegments.isEmpty ? '-' : request.uri.pathSegments.first} '
+          'range=${e.range} reason=${e.reason}',
+        );
+      } else if (_clientGone(e)) {
+        VodProxyLog.log('req-client-gone ${request.uri.path} $e');
+      } else {
+        VodProxyLog.log('req-fail ${request.uri.path} $e');
+      }
       try {
         if (!response.headers.chunkedTransferEncoding &&
             response.contentLength == 0) {

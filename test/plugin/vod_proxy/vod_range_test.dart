@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
@@ -214,6 +215,71 @@ void main() {
     expect(
       pool.available.map((h) => h.host),
       contains('upos-sz-mirrorali.bilivideo.com'),
+    );
+  });
+
+  test('pickUrl can reuse a banned host as last resort', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw], random: Random(1));
+    for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+      pool.recordFailure(ali, reason: 'TimeoutException');
+    }
+    expect(
+      pool.available.map((h) => h.host),
+      isNot(contains('upos-sz-mirrorali.bilivideo.com')),
+    );
+    expect(
+      Uri.parse(pool.pickUrl(allowBanned: true)!).host,
+      anyOf(
+        'upos-sz-mirrorali.bilivideo.com',
+        'upos-sz-mirrorhw.bilivideo.com',
+      ),
+    );
+    pool.recordFailure(hw, reason: 'TimeoutException');
+    pool.recordFailure(hw, reason: 'TimeoutException');
+    pool.recordFailure(hw, reason: 'TimeoutException');
+    expect(pool.available, isEmpty);
+    expect(
+      Uri.parse(pool.pickUrl(allowBanned: true)!).host,
+      anyOf(
+        'upos-sz-mirrorali.bilivideo.com',
+        'upos-sz-mirrorhw.bilivideo.com',
+      ),
+    );
+  });
+
+  test('freeze detector uses video-pts/frames not wall time-pos', () {
+    expect(
+      PlaybackDiag.freezeVideoMoved(
+        frame: 10,
+        lastFrame: 10,
+        videoPts: 1.0,
+        lastVideoPts: 1.0,
+      ),
+      isFalse,
+    );
+    expect(
+      PlaybackDiag.freezeAudioMoved(audioPts: 1.5, lastAudioPts: 1.0),
+      isTrue,
+    );
+    expect(
+      PlaybackDiag.freezeVideoMoved(
+        frame: 11,
+        lastFrame: 10,
+        videoPts: 1.0,
+        lastVideoPts: 1.0,
+      ),
+      isTrue,
+    );
+    expect(
+      PlaybackDiag.freezeVideoMoved(
+        frame: 10,
+        lastFrame: 10,
+        videoPts: 1.4,
+        lastVideoPts: 1.0,
+      ),
+      isTrue,
     );
   });
 }

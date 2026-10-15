@@ -9,6 +9,16 @@ import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 
+class VodServeAbort implements Exception {
+  VodServeAbort(this.range, this.reason);
+
+  final ByteRange range;
+  final Object? reason;
+
+  @override
+  String toString() => 'VodServeAbort $range reason=$reason';
+}
+
 class VodSession {
   VodSession({
     required this.id,
@@ -17,6 +27,8 @@ class VodSession {
     required this.chunkSize,
     required this.windowBytes,
     required this.workers,
+    this.attemptTimeout = const Duration(seconds: 6),
+    this.fetchBudget = const Duration(seconds: 45),
   }) : pool = VodHostPool(candidates);
 
   final String id;
@@ -25,6 +37,8 @@ class VodSession {
   final int chunkSize;
   final int windowBytes;
   final int workers;
+  final Duration attemptTimeout;
+  final Duration fetchBudget;
 
   final HttpClient _client = HttpClient()
     ..userAgent = BrowserUa.pc
@@ -206,18 +220,35 @@ class VodSession {
       var pos = start;
       while (!_closed && epoch == _readEpoch && pos < endExclusive) {
         final idx = pos ~/ chunkSize;
+        final expected = _chunkLen(idx);
         final Uint8List chunk;
         try {
-          chunk = await _chunk(idx, urgent: pos == start);
+          chunk = await _chunkUntil(
+            idx,
+            urgent: pos == start,
+            epoch: epoch,
+          );
         } on _SessionClosed {
           return;
         }
         if (_closed || epoch != _readEpoch) return;
+        if (chunk.length != expected) {
+          throw VodServeAbort(
+            ByteRange(idx * chunkSize, idx * chunkSize + expected),
+            'bad-length got=${chunk.length} want=$expected',
+          );
+        }
         final offset = pos - idx * chunkSize;
-        if (offset >= chunk.length) {
-          return;
+        if (offset < 0 || offset >= chunk.length) {
+          throw VodServeAbort(
+            ByteRange(pos, endExclusive),
+            'bad-offset offset=$offset len=${chunk.length}',
+          );
         }
         final take = min(chunk.length - offset, endExclusive - pos);
+        if (take <= 0) {
+          throw VodServeAbort(ByteRange(pos, endExclusive), 'empty-take');
+        }
         yield chunk.sublist(offset, offset + take);
         pos += take;
         _cursor = pos;
@@ -255,12 +286,57 @@ class VodSession {
       await _chunk(idx);
     } on _SessionClosed {
       // Player moved on; in-flight Range work is expected to stop.
+    } catch (e) {
+      VodProxyLog.log('prefetch-fail id=$id idx=$idx $e');
     }
+  }
+
+  Future<Uint8List> _chunkUntil(
+    int idx, {
+    required bool urgent,
+    required int epoch,
+  }) async {
+    final deadline = DateTime.now().add(fetchBudget);
+    Object? lastError;
+    while (!_closed && epoch == _readEpoch) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining.inMilliseconds <= 0) {
+        final start = idx * chunkSize;
+        throw VodServeAbort(
+          ByteRange(start, start + _chunkLen(idx)),
+          lastError ?? 'deadline ${fetchBudget.inSeconds}s',
+        );
+      }
+      try {
+        final chunk = await _chunk(idx, urgent: urgent);
+        final expected = _chunkLen(idx);
+        if (chunk.length == expected) return chunk;
+        _chunks.remove(idx);
+        lastError = 'bad-length got=${chunk.length} want=$expected';
+        VodProxyLog.log(
+          'retry id=$id range=${ByteRange(idx * chunkSize, idx * chunkSize + expected)} '
+          'from=- reason=$lastError',
+        );
+      } on _SessionClosed {
+        rethrow;
+      } on VodServeAbort {
+        rethrow;
+      } catch (e) {
+        lastError = e;
+        VodProxyLog.log('read-retry id=$id idx=$idx reason=$e');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+    }
+    throw const _SessionClosed();
   }
 
   Future<Uint8List> _chunk(int idx, {bool urgent = false}) {
     final cached = _chunks[idx];
-    if (cached != null) return Future.value(cached);
+    final expected = _chunkLen(idx);
+    if (cached != null) {
+      if (cached.length == expected) return Future.value(cached);
+      _chunks.remove(idx);
+    }
     return _inflight.putIfAbsent(idx, () async {
       try {
         if (_closed) throw const _SessionClosed();
@@ -268,10 +344,16 @@ class VodSession {
         if (_closed) throw const _SessionClosed();
         final start = idx * chunkSize;
         final end = min(start + chunkSize, size);
+        final want = end - start;
         final fetched = await _fetchRange(
           ByteRange(start, end),
           urgent: urgent,
         );
+        if (fetched.bytes.length != want) {
+          throw StateError(
+            'chunk-len got=${fetched.bytes.length} want=$want',
+          );
+        }
         fileSize ??= fetched.total;
         _chunks[idx] = fetched.bytes;
         _fetchedChunks.add(idx);
@@ -288,15 +370,28 @@ class VodSession {
   }) async {
     Object? lastError;
     String? lastHost;
-    for (var attempt = 0; attempt < 5; attempt++) {
+    final deadline = DateTime.now().add(fetchBudget);
+    var attempt = 0;
+    while (DateTime.now().isBefore(deadline)) {
       if (_closed) throw const _SessionClosed();
-      final url = pool.pickUrl(avoidHost: lastHost);
-      if (url == null) break;
+      attempt++;
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining.inMilliseconds < 50) break;
+      final allowBanned = attempt >= 4;
+      String? url;
+      if (attempt >= 8 && pool.allUrls.isNotEmpty) {
+        url = pool.allUrls[(attempt - 1) % pool.allUrls.length];
+      } else {
+        url = pool.pickUrl(avoidHost: lastHost, allowBanned: allowBanned);
+      }
+      if (url == null || url.isEmpty) {
+        url = pool.primaryUrl;
+      }
+      if (url.isEmpty) break;
       lastHost = Uri.tryParse(url)?.host;
+      final perTry = remaining < attemptTimeout ? remaining : attemptTimeout;
       try {
-        final result = await _get(url, range).timeout(
-          const Duration(seconds: 6),
-        );
+        final result = await _get(url, range).timeout(perTry);
         if (result.bytes.length != range.length) {
           retries++;
           pool.recordFailure(url, reason: 'short-read');
@@ -304,7 +399,7 @@ class VodSession {
             'retry id=$id range=$range from=$lastHost reason=short-read '
             'got=${result.bytes.length} want=${range.length}',
           );
-          lastError = StateError('short read');
+          lastError = StateError('short-read');
           continue;
         }
         return result;
@@ -331,7 +426,9 @@ class VodSession {
         lastError = e;
       }
     }
-    throw lastError ?? StateError('no host for $range');
+    final why = lastError ?? 'deadline ${fetchBudget.inSeconds}s n=$attempt';
+    VodProxyLog.log('abort id=$id range=$range reason=$why');
+    throw VodServeAbort(range, why);
   }
 
   Future<({Uint8List bytes, int total})> _get(
@@ -368,6 +465,18 @@ class VodSession {
       }
       fileSize ??= parsed.total;
       final slice = _sliceCovered(body, parsed, range);
+      if (slice.length != range.length) {
+        if (probe &&
+            range.start == 0 &&
+            parsed.total > 0 &&
+            slice.length == parsed.total) {
+          // File shorter than the probe window — still a valid 206.
+        } else {
+          throw StateError(
+            'short-read got=${slice.length} want=${range.length}',
+          );
+        }
+      }
       pool.recordSuccess(
         url,
         bytes: slice.length,

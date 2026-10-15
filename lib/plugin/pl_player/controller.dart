@@ -576,6 +576,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
   bool _openedViaProxy = false;
   bool _proxyFallbackScheduled = false;
+  bool _proxyRecovering = false;
   Timer? _proxyOpenWatchdog;
   final PlaybackDiag _diag = PlaybackDiag();
   String? _playTitle;
@@ -1356,6 +1357,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             : '-',
         dashCodec: _dashCodec,
       );
+      _diag.onEarlyEnd = _openedViaProxy ? _recoverProxyVideo : null;
     }
   }
 
@@ -1664,6 +1666,44 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       if (VodHttpProxy.instance.requestsServed > 0) return;
       _scheduleProxyFallback('no-proxy-request');
     });
+  }
+
+  void _recoverProxyVideo(String reason) {
+    if (!_openedViaProxy || isLive || _proxyRecovering || _playerCount == 0) {
+      return;
+    }
+    final player = _videoPlayerController;
+    if (player == null) return;
+    final pos = player.state.position;
+    final dur = player.state.duration;
+    final dashDur = _dashDurationSec ?? 0;
+    final endMs = dur.inMilliseconds > 0 ? dur.inMilliseconds : dashDur * 1000;
+    if (reason == 'video-eof' &&
+        endMs > 2000 &&
+        pos.inMilliseconds + 2000 >= endMs) {
+      return;
+    }
+    _proxyRecovering = true;
+    VodProxyLog.play(
+      'recover reason=$reason pos=${pos.inMilliseconds}ms',
+    );
+    unawaited(() async {
+      try {
+        try {
+          await player.command(const ['video-reload']);
+          await player.seek(pos);
+          return;
+        } catch (_) {}
+        if (player.current.isEmpty) return;
+        var media = player.current.last;
+        media = media.copyWith(start: pos);
+        await player.open(media, play: true);
+      } catch (e) {
+        VodProxyLog.play('recover-failed reason=$reason $e');
+      } finally {
+        _proxyRecovering = false;
+      }
+    }());
   }
 
   void _scheduleProxyFallback(String reason) {

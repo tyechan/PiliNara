@@ -13,6 +13,13 @@ void main() {
   test('parses 10-digit versionCode from short fork names', () {
     expect(
       Update.parseRemoteVersionCode(
+        tagName: 'v2.1.6-1016c+abc1234',
+        name: 'PiliPala 2.1.6-1016c+abc1234 (2026101603)',
+      ),
+      2026101603,
+    );
+    expect(
+      Update.parseRemoteVersionCode(
         tagName: 'v2.1.6-1016b+abc1234',
         name: 'PiliPala 2.1.6-1016b+abc1234 (2026101602)',
       ),
@@ -64,9 +71,9 @@ void main() {
     expect(BuildConfig.displayVersion.length, lessThanOrEqualTo(24));
     expect(BuildConfig.displayVersion, contains('·'));
     expect(BuildConfig.versionName.length, lessThanOrEqualTo(16));
-    expect(BuildConfig.versionName, '2.1.6-1016b');
-    expect(VodProxyLog.bootLine, contains('2.1.6-1016b'));
-    expect(VodProxyLog.bootLine, contains('2026101602'));
+    expect(BuildConfig.versionName, '2.1.6-1016c');
+    expect(VodProxyLog.bootLine, contains('2.1.6-1016c'));
+    expect(VodProxyLog.bootLine, contains('2026101603'));
     expect(VodProxyLog.safeTitle('audio2'), '-');
     expect(VodProxyLog.safeTitle('https://upos-sz-mirrorali.bilivideo.com/a.m4s?deadline=1'), '-');
     expect(VodProxyLog.safeTitle('真正的标题'), '真正的标题');

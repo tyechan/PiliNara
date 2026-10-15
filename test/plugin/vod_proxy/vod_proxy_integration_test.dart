@@ -8,13 +8,22 @@ import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _MockCdn {
-  _MockCdn(this.bytes, {this.resetAfter, this.widerWindow = false});
+  _MockCdn(
+    this.bytes, {
+    this.resetAfter,
+    this.widerWindow = false,
+    this.timeoutAt,
+    this.timeoutFor = const Duration(seconds: 2),
+  });
 
   final Uint8List bytes;
   final int? resetAfter;
   final bool widerWindow;
+  final int? timeoutAt;
+  final Duration timeoutFor;
   HttpServer? _server;
   int resets = 0;
+  int timeouts = 0;
 
   String get url => 'http://127.0.0.1:${_server!.port}/file.bin';
 
@@ -48,6 +57,12 @@ class _MockCdn {
         response.headers.contentLength = end - start + 1;
         if (request.method == 'HEAD') {
           await response.close();
+          return;
+        }
+        if (timeoutAt != null && start == timeoutAt && timeouts < 1) {
+          timeouts++;
+          await Future<void>.delayed(timeoutFor);
+          (await response.detachSocket()).destroy();
           return;
         }
         var sent = 0;
@@ -144,6 +159,84 @@ void main() {
     final got = await _fetchAll(proxyUrl!);
     expect(got, payload);
   }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('mid-response chunk timeout still serves the full file', () async {
+    final cdn = _MockCdn(
+      payload,
+      timeoutAt: 32 * 1024,
+      timeoutFor: const Duration(seconds: 2),
+    );
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      windowBytes: 64 * 1024,
+      workers: 3,
+      attemptTimeout: const Duration(milliseconds: 400),
+      fetchBudget: const Duration(seconds: 8),
+    );
+    expect(proxyUrl, isNotNull);
+    final got = await _fetchAll(proxyUrl!).timeout(const Duration(seconds: 20));
+    expect(got, payload);
+    expect(cdn.timeouts, 1);
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('abort id=')),
+      isEmpty,
+    );
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('ffmpeg copies a real MP4 through a mid-chunk CDN timeout', () async {
+    final ffmpeg = _which('ffmpeg');
+    if (ffmpeg == null) {
+      // ignore: avoid_print
+      print('SKIP ffmpeg not installed');
+      return;
+    }
+    final dir = await Directory.systemTemp.createTemp('vodproxy');
+    addTearDown(() => dir.delete(recursive: true));
+    final src = File('${dir.path}/src.mp4');
+    await _run(ffmpeg, [
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'testsrc=duration=2:size=320x240:rate=15',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:duration=2',
+      '-c:v',
+      'libx264',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      src.path,
+    ]);
+    final bytes = Uint8List.fromList(await src.readAsBytes());
+    expect(bytes.length, greaterThan(20 * 1024));
+    final cdn = _MockCdn(
+      bytes,
+      timeoutAt: 16 * 1024,
+      timeoutFor: const Duration(seconds: 2),
+    );
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      workers: 3,
+      attemptTimeout: const Duration(milliseconds: 400),
+      fetchBudget: const Duration(seconds: 8),
+    );
+    expect(proxyUrl, isNotNull);
+    final out = File('${dir.path}/out.mp4');
+    await _run(ffmpeg, ['-y', '-i', proxyUrl!, '-c', 'copy', out.path]);
+    expect(out.lengthSync(), greaterThan(1000));
+    expect(cdn.timeouts, 1);
+    await _run(ffmpeg, ['-v', 'error', '-i', out.path, '-f', 'null', '-']);
+  }, timeout: const Timeout(Duration(seconds: 40)));
 
   test('proxy retries after a mid-stream CDN reset', () async {
     final cdn = _MockCdn(payload, resetAfter: 4 * 1024);

@@ -92,9 +92,17 @@ class VodHostPool {
     return ranked.take(k).toList();
   }
 
+  String get primaryUrl => _hosts.isEmpty ? '' : _hosts.first.url;
+
+  List<String> get allUrls => _hosts.map((h) => h.url).toList();
+
   /// Spread workers across the 2–3 best hosts, weighted by measured throughput.
-  String? pickUrl({String? avoidHost}) {
+  /// [allowBanned] is a last-resort path after other hosts keep failing.
+  String? pickUrl({String? avoidHost, bool allowBanned = false}) {
     var open = available;
+    if (open.isEmpty && allowBanned) {
+      open = [..._hosts];
+    }
     if (open.isEmpty) {
       if (_hosts.isEmpty) return null;
       return _hosts[_rotate++ % _hosts.length].url;
@@ -102,7 +110,12 @@ class VodHostPool {
     if (avoidHost != null) {
       final avoid = avoidHost.toLowerCase();
       final filtered = open.where((h) => h.host != avoid).toList();
-      if (filtered.isNotEmpty) open = filtered;
+      if (filtered.isNotEmpty) {
+        open = filtered;
+      } else if (allowBanned) {
+        final banned = _hosts.where((h) => h.host != avoid).toList();
+        if (banned.isNotEmpty) open = banned;
+      }
     }
     final top = _ranked(open).take(3).toList();
     if (top.isEmpty) return open.first.url;

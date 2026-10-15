@@ -15,8 +15,9 @@ class PlaybackDiag {
   DateTime? _startedAt;
   bool _loggedFirstFrame = false;
   DateTime? _videoStuckSince;
-  Duration _lastVideoPos = Duration.zero;
-  Duration _lastAudioPos = Duration.zero;
+  bool _freezeLogged = false;
+  double? _lastVideoPts;
+  double? _lastAudioPts;
   int? _lastFrame;
   int _nalBurst = 0;
   DateTime? _nalWindowStart;
@@ -27,6 +28,9 @@ class PlaybackDiag {
   String _videoHost = '-';
   String _audioHost = '-';
   String? _dashCodec;
+  void Function(String reason)? onEarlyEnd;
+  DateTime? _lastRecoverAt;
+  int _recoverCount = 0;
 
   void attach(
     Player player, {
@@ -45,9 +49,15 @@ class PlaybackDiag {
     _startedAt = DateTime.now();
     VodProxyLog.firstFrameMs = null;
     _videoStuckSince = null;
+    _freezeLogged = false;
+    _lastVideoPts = null;
+    _lastAudioPts = null;
+    _lastFrame = null;
     _nalBurst = 0;
     _eofVideo = false;
     _eofAudio = false;
+    _recoverCount = 0;
+    _lastRecoverAt = null;
     _ticks = 0;
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
       _onTick(player);
@@ -73,7 +83,33 @@ class PlaybackDiag {
 
   void onSeek(Duration pos) {
     _videoStuckSince = null;
+    _freezeLogged = false;
     VodProxyLog.play('mpv seek pos=${pos.inMilliseconds}ms');
+  }
+
+  /// Video progress must not use mpv `time-pos` (it follows the audio clock).
+  static bool freezeVideoMoved({
+    required int? frame,
+    required int? lastFrame,
+    required double? videoPts,
+    required double? lastVideoPts,
+  }) {
+    if (frame != null && lastFrame != null && frame > lastFrame) return true;
+    if (videoPts != null &&
+        lastVideoPts != null &&
+        videoPts > lastVideoPts + 0.15) {
+      return true;
+    }
+    return false;
+  }
+
+  static bool freezeAudioMoved({
+    required double? audioPts,
+    required double? lastAudioPts,
+  }) {
+    return audioPts != null &&
+        lastAudioPts != null &&
+        audioPts > lastAudioPts + 0.15;
   }
 
   void onLog(PlayerLog log) {
@@ -87,6 +123,12 @@ class PlaybackDiag {
     if (text.contains('Stream ends prematurely') ||
         lower.contains('stream ends prematurely')) {
       VodProxyLog.play('mpv stream-ends-prematurely ${log.prefix}');
+      _requestRecover('video-eof');
+      return;
+    }
+    if (lower.contains('partial file')) {
+      VodProxyLog.play('mpv partial-file ${log.prefix} ${log.text}');
+      _requestRecover('partial-file');
       return;
     }
     if (lower.contains('reconnect') || text.contains('ffurl_read returned')) {
@@ -100,6 +142,11 @@ class PlaybackDiag {
       _noteNal();
       return;
     }
+    if (lower.contains('partial file')) {
+      VodProxyLog.play('mpv partial-file $event');
+      _requestRecover('partial-file');
+      return;
+    }
     if (event.contains('EOF') || lower.contains('end of file')) {
       if (lower.contains('audio') && !_eofAudio) {
         _eofAudio = true;
@@ -107,8 +154,25 @@ class PlaybackDiag {
       } else if (!_eofVideo) {
         _eofVideo = true;
         VodProxyLog.play('mpv eof video');
+        _requestRecover('video-eof');
       }
     }
+  }
+
+  void _requestRecover(String reason) {
+    if (_directMode) return;
+    final now = DateTime.now();
+    if (_recoverCount >= 2) return;
+    if (_lastRecoverAt != null &&
+        now.difference(_lastRecoverAt!) < const Duration(seconds: 8)) {
+      return;
+    }
+    _recoverCount++;
+    _lastRecoverAt = now;
+    _eofVideo = false;
+    _videoStuckSince = null;
+    _freezeLogged = false;
+    onEarlyEnd?.call(reason);
   }
 
   void _noteNal() {
@@ -131,7 +195,6 @@ class PlaybackDiag {
   }
 
   void _onTick(Player player) {
-    if (player is! NativePlayer) return;
     String prop(String name) {
       try {
         return player.getProperty(name);
@@ -173,35 +236,59 @@ class PlaybackDiag {
         );
       }
 
-      final vPos = player.state.position;
-      final aPtsRaw = prop('audio-pts');
-      final aSec = double.tryParse(aPtsRaw);
-      final aPos = aSec == null
-          ? vPos
-          : Duration(milliseconds: (aSec * 1000).round());
+      final pausedForCache = prop('paused-for-cache');
+      final seeking = prop('seeking');
+      final paused = prop('pause');
+      final eofReached = prop('eof-reached');
+      final videoPts = double.tryParse(prop('video-pts'));
+      final audioPts = double.tryParse(prop('audio-pts'));
       final frame = int.tryParse(prop('estimated-frame-number'));
+      final timePos = player.state.position;
+      final duration = player.state.duration;
 
-      final videoMoved =
-          vPos > _lastVideoPos + const Duration(milliseconds: 200) ||
-          (frame != null && _lastFrame != null && frame > _lastFrame!);
-      final audioMoved = aPos > _lastAudioPos + const Duration(milliseconds: 200);
-      if (!videoMoved && audioMoved && player.state.playing) {
+      if (eofReached == 'yes' &&
+          !_directMode &&
+          duration > const Duration(seconds: 2) &&
+          timePos + const Duration(seconds: 2) < duration) {
+        _requestRecover('video-eof');
+      }
+
+      final buffering = pausedForCache == 'yes' || paused == 'yes' || seeking == 'yes';
+      final videoMoved = freezeVideoMoved(
+        frame: frame,
+        lastFrame: _lastFrame,
+        videoPts: videoPts,
+        lastVideoPts: _lastVideoPts,
+      );
+      final audioMoved = freezeAudioMoved(
+        audioPts: audioPts,
+        lastAudioPts: _lastAudioPts,
+      );
+      if (!buffering && !videoMoved && audioMoved) {
         _videoStuckSince ??= DateTime.now();
         final stuck = DateTime.now().difference(_videoStuckSince!);
-        if (stuck >= const Duration(seconds: 3) &&
-            stuck < const Duration(seconds: 4)) {
+        if (!_freezeLogged && stuck >= const Duration(seconds: 3)) {
+          _freezeLogged = true;
+          final aAdv = audioPts != null && _lastAudioPts != null
+              ? ((audioPts - _lastAudioPts!) * 1000).round()
+              : -1;
           VodProxyLog.play(
             'freeze video-stuck=${stuck.inMilliseconds}ms '
-            'audio-adv=${(aPos - _lastAudioPos).inMilliseconds}ms '
-            'vpos=${vPos.inMilliseconds}ms apos=${aPos.inMilliseconds}ms '
-            'frames=${frame ?? -1}',
+            'audio-adv=${aAdv}ms '
+            'vpos=${timePos.inMilliseconds}ms '
+            'video-pts=${videoPts ?? '-'} audio-pts=${audioPts ?? '-'} '
+            'frames=${frame ?? -1} hwdec=${_lastHwdec ?? prop('hwdec-current')} '
+            'paused-for-cache=$pausedForCache eof-reached=$eofReached '
+            'demuxer-cache-duration=${prop('demuxer-cache-duration')} '
+            'cache-speed=${prop('cache-speed')} seeking=$seeking pause=$paused',
           );
         }
       } else if (videoMoved) {
         _videoStuckSince = null;
+        _freezeLogged = false;
       }
-      _lastVideoPos = vPos;
-      _lastAudioPos = aPos;
+      _lastVideoPts = videoPts ?? _lastVideoPts;
+      _lastAudioPts = audioPts ?? _lastAudioPts;
       if (frame != null) _lastFrame = frame;
     } catch (_) {}
   }
