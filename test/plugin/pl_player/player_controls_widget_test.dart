@@ -7,8 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 
 /// Replica of the on-screen chrome (header PlayerBar + bottom buttons +
-/// lock/screenshot). Matches HeaderControl after the upstream title-slot fix:
-/// title is Padding/Column, never Expanded/Spacer.
+/// lock/screenshot). Matches HeaderControl after Starfallan 2.1.6: title is
+/// Stack/Padding/Column, never Expanded/Spacer.
 class _PlayerControlsChrome extends StatelessWidget {
   const _PlayerControlsChrome({
     required this.fullscreen,

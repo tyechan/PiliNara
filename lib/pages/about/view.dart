@@ -125,7 +125,7 @@ class _AboutPageState extends State<AboutPage> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
-                  '基于PiliPlus做了一些自用修改',
+                  'PiliNara 个人分支（多线程点播代理）',
                   style: TextStyle(color: outline),
                   semanticsLabel: '与你一起，发现不一样的世界',
                 ),
@@ -174,13 +174,19 @@ Commit Hash: ${BuildConfig.commitHash}''',
           ListTile(
             onTap: () => PageUtils.launchURL(Constants.sourceCodeUrl),
             leading: const Icon(Icons.code),
-            title: const Text('Source Code'),
+            title: const Text('本仓库'),
             subtitle: Text(Constants.sourceCodeUrl, style: subTitleStyle),
+          ),
+          ListTile(
+            onTap: () => PageUtils.launchURL(Constants.naraCodeUrl),
+            leading: const Icon(Icons.code),
+            title: const Text('PiliNara 上游'),
+            subtitle: Text(Constants.naraCodeUrl, style: subTitleStyle),
           ),
           ListTile(
             onTap: () => PageUtils.launchURL(Constants.upstreamCodeUrl),
             leading: const Icon(Icons.code),
-            title: const Text('Upstream Code'),
+            title: const Text('PiliPlus 上游'),
             subtitle: Text(Constants.upstreamCodeUrl, style: subTitleStyle),
           ),
           if (Platform.isAndroid)
