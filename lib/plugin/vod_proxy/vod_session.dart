@@ -47,6 +47,7 @@ class VodSession {
   bool _closed = false;
   bool _probed = false;
   bool _endLogged = false;
+  bool _pauseLogged = false;
   String? fallbackReason;
   Timer? _statsTimer;
   int _readEpoch = 0;
@@ -165,6 +166,7 @@ class VodSession {
           final result = await _get(
             stat.url,
             ByteRange(0, probeBytes),
+            probe: true,
           ).timeout(const Duration(seconds: 3));
           fileSize ??= result.total;
           VodProxyLog.log(
@@ -172,7 +174,7 @@ class VodSession {
             'thru=${(stat.emaBps * 8 / 1e6).toStringAsFixed(2)}Mbps status=ok',
           );
         } catch (e) {
-          pool.recordFailure(stat.url, reason: 'probe $e');
+          pool.recordFailure(stat.url, reason: 'probe $e', probe: true);
           VodProxyLog.log(
             'probe id=$id host=${stat.host} status=fail reason=$e',
           );
@@ -222,6 +224,7 @@ class VodSession {
         _bytesDelivered += take;
         _servedChunks.add(idx);
         lastServeAt = DateTime.now();
+        _pauseLogged = false;
         _evict();
         unawaited(_prefetch(pos));
       }
@@ -333,8 +336,9 @@ class VodSession {
 
   Future<({Uint8List bytes, int total})> _get(
     String url,
-    ByteRange range,
-  ) async {
+    ByteRange range, {
+    bool probe = false,
+  }) async {
     final sw = Stopwatch()..start();
     final req = await _client.getUrl(Uri.parse(url));
     req.headers.set(HttpHeaders.refererHeader, HttpString.baseUrl);
@@ -369,6 +373,7 @@ class VodSession {
         bytes: slice.length,
         elapsedMs: sw.elapsedMilliseconds,
         ttfbMs: ttfbMs,
+        probe: probe,
       );
       return (bytes: slice, total: parsed.total);
     }
@@ -383,6 +388,7 @@ class VodSession {
           bytes: range.length,
           elapsedMs: sw.elapsedMilliseconds,
           ttfbMs: ttfbMs,
+          probe: probe,
         );
         return (
           bytes: body.sublist(0, range.length),
@@ -433,8 +439,14 @@ class VodSession {
   }
 
   void logSessionEnd({String reason = 'close'}) {
+    final pausing = reason == 'pause' || reason == 'detach';
     if (_endLogged) return;
-    _endLogged = true;
+    if (pausing && _pauseLogged) return;
+    if (pausing) {
+      _pauseLogged = true;
+    } else {
+      _endLogged = true;
+    }
     VodProxyLog.log(
       'session_end id=$id kind=$kind reason=$reason '
       'served=${_fmtBytes(uniqueServedBytes)} '

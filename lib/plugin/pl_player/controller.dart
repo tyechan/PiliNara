@@ -578,6 +578,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool _proxyFallbackScheduled = false;
   Timer? _proxyOpenWatchdog;
   final PlaybackDiag _diag = PlaybackDiag();
+  String? _playTitle;
+  String? _dashCodec;
+  String? _dashFps;
+  int? _dashDurationSec;
 
   late final progressType = Pref.btmProgressBehavior;
   late final enableQuickDouble = Pref.enableQuickDouble;
@@ -1025,6 +1029,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     VoidCallback? onInit,
     Volume? volume,
     bool autoFullScreenFlag = false,
+    String? title,
+    String? codec,
+    String? fps,
   }) async {
     try {
       _processing = true;
@@ -1060,6 +1067,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       this.height = height;
       this.dataSource = dataSource;
       _autoPlay = autoplay;
+      _playTitle = title;
+      _dashCodec = (codec == null || codec.isEmpty) ? null : codec;
+      _dashFps = (fps == null || fps.isEmpty) ? null : fps;
+      _dashDurationSec = duration?.inSeconds;
       if (Platform.isAndroid && !isLive) {
         VodHttpProxy.instance.closeAll(reason: 'media-change');
       }
@@ -1332,12 +1343,23 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     );
     applyVideoPictureParameters(player);
     if (Platform.isAndroid && !isLive) {
-      _logPlaybackStart(playSource);
-      _diag.attach(player, proxy: _openedViaProxy);
+      _logPlaybackStart();
+      final orig = dataSource;
+      _diag.attach(
+        player,
+        proxy: _openedViaProxy,
+        videoHost: orig is NetworkSource
+            ? VodProxyLog.hostOnly(orig.videoSource)
+            : '-',
+        audioHost: orig is NetworkSource
+            ? VodProxyLog.hostOnly(orig.audioSource)
+            : '-',
+        dashCodec: _dashCodec,
+      );
     }
   }
 
-  void _logPlaybackStart(DataSource playSource) {
+  void _logPlaybackStart() {
     final qaH = height;
     final qaName = qaH == null
         ? '-'
@@ -1350,13 +1372,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         : qaH >= 720
         ? '720P'
         : '${qaH}P';
-    final vHost = playSource is NetworkSource
-        ? (Uri.tryParse(playSource.videoSource)?.host ?? '-')
-        : 'file';
-    final aHost = playSource is NetworkSource
-        ? (playSource.audioSource == null
-              ? '-'
-              : (Uri.tryParse(playSource.audioSource!)?.host ?? '-'))
+    final orig = dataSource;
+    final vHost = orig is NetworkSource
+        ? VodProxyLog.hostOnly(orig.videoSource)
+        : (orig is FileSource ? 'file' : '-');
+    final aHost = orig is NetworkSource
+        ? VodProxyLog.hostOnly(orig.audioSource)
         : '-';
     final videoHosts = _openedViaProxy
         ? VodHttpProxy.instance.hostsFor('video')
@@ -1364,28 +1385,17 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final audioHosts = _openedViaProxy
         ? VodHttpProxy.instance.hostsFor('audio')
         : aHost;
+    final dur = _dashDurationSec ??
+        (duration.value > 0
+            ? duration.value
+            : (_videoPlayerController?.state.duration.inSeconds ?? 0));
     VodProxyLog.log(
       'play bvid=${_bvid ?? '-'} cid=${cid ?? '-'} aid=${_aid ?? '-'} '
-      'title=${_mediaTitle(playSource)} quality=$qaName height=${qaH ?? '-'} '
-      'codec=- fps=- duration=${_videoPlayerController?.state.duration.inSeconds ?? 0}s '
+      'title=${VodProxyLog.safeTitle(_playTitle)} quality=$qaName height=${qaH ?? '-'} '
+      'codec=${_dashCodec ?? '-'} fps=${_dashFps ?? '-'} duration=${dur}s '
       'mode=${_openedViaProxy ? 'proxy' : 'direct'} '
       'videoHosts=$videoHosts audioHosts=$audioHosts',
     );
-  }
-
-  String _mediaTitle(DataSource playSource) {
-    try {
-      final player = _videoPlayerController;
-      if (player is NativePlayer) {
-        final t = player.getProperty('media-title');
-        if (t.isNotEmpty && t != '-') return t.replaceAll('\n', ' ');
-      }
-    } catch (_) {}
-    if (playSource is NetworkSource) {
-      final segs = Uri.tryParse(playSource.videoSource)?.pathSegments;
-      if (segs != null && segs.isNotEmpty) return segs.last;
-    }
-    return '-';
   }
 
   Future<void>? refreshPlayer() {
@@ -2684,6 +2694,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     await onNeedsPlayerInit?.call();
   }
 
+  void flushProxySessionOnBackground({String reason = 'pause'}) {
+    if (Platform.isAndroid && !isLive) {
+      VodHttpProxy.instance.flushSessionEnd(reason: reason);
+    }
+  }
+
   /// 生命周期变化 — 由 view 转发
   void handleAutoAudioOnlyLifecycle(AppLifecycleState state) {
     _lastAppLifecycleState = state;
@@ -2691,6 +2707,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     switch (state) {
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
+        flushProxySessionOnBackground();
         _cancelAutoAudioOnlyTimer();
         if (_autoAudioRestoreInProgress) {
           _interruptAutoAudioRestore();
@@ -2726,6 +2743,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         // 过渡状态，忽略
         break;
       case AppLifecycleState.detached:
+        flushProxySessionOnBackground(reason: 'detach');
         _cancelAutoAudioOnlyTimer();
         _interruptAutoAudioRestore();
         break;

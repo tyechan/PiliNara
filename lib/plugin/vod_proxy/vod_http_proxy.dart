@@ -72,6 +72,13 @@ class VodHttpProxy {
     }
   }
 
+  void flushSessionEnd({String reason = 'pause'}) {
+    if (_sessions.isEmpty) return;
+    for (final session in _sessions.values) {
+      session.logSessionEnd(reason: reason);
+    }
+  }
+
   Future<bool> ensureStarted() async {
     if (isRunning) return true;
     try {

@@ -18,6 +18,10 @@ class VodHostStat {
   int bytes = 0;
   int ttfbMs = 0;
   int ttfbSamples = 0;
+  int chunkBytes = 0;
+  int chunkSuccesses = 0;
+  int chunkErrors = 0;
+  final List<DateTime> recentTimeouts = <DateTime>[];
   DateTime? blacklistedUntil;
   String? lastBanReason;
 
@@ -25,7 +29,8 @@ class VodHostStat {
 
   double get avgTtfbMs => ttfbSamples == 0 ? 0 : ttfbMs / ttfbSamples;
 
-  bool get hasTraffic => bytes > 0 || successes > 0 || errors > 0;
+  bool get hasChunkTraffic =>
+      chunkBytes > 0 || chunkSuccesses > 0 || chunkErrors > 0;
 }
 
 class VodHostPool {
@@ -42,6 +47,7 @@ class VodHostPool {
 
   static const int banAfterErrors = 3;
   static const Duration defaultBan = Duration(seconds: 30);
+  static const Duration banWindow = Duration(seconds: 30);
 
   static List<VodHostStat> _unique(List<String> urls) {
     final seen = <String>{};
@@ -151,12 +157,10 @@ class VodHostPool {
     required int bytes,
     required int elapsedMs,
     int? ttfbMs,
+    bool probe = false,
   }) {
     final stat = _find(url);
     if (stat == null) return;
-    stat.successes++;
-    stat.consecutiveErrors = 0;
-    stat.bytes += bytes;
     if (ttfbMs != null && ttfbMs > 0) {
       stat.ttfbMs += ttfbMs;
       stat.ttfbSamples++;
@@ -166,16 +170,25 @@ class VodHostPool {
       stat.emaBps = stat.emaBps <= 0 ? bps : (stat.emaBps * 0.7 + bps * 0.3);
       if (bps > stat.peakBps) stat.peakBps = bps;
     }
+    if (probe) return;
+    stat.successes++;
+    stat.consecutiveErrors = 0;
+    stat.bytes += bytes;
+    stat.chunkBytes += bytes;
+    stat.chunkSuccesses++;
   }
 
   void recordFailure(
     String url, {
     required String reason,
     Duration ban = defaultBan,
+    bool probe = false,
   }) {
     final stat = _find(url);
     if (stat == null) return;
     stat.errors++;
+    if (probe) return;
+    stat.chunkErrors++;
     stat.consecutiveErrors++;
     final timeoutLike =
         reason.contains('Timeout') ||
@@ -184,13 +197,21 @@ class VodHostPool {
         reason.contains('Connection reset') ||
         reason == '403' ||
         reason == 'short-read';
-    if (stat.consecutiveErrors >= banAfterErrors && timeoutLike) {
-      stat.blacklistedUntil = DateTime.now().add(ban);
-      stat.lastBanReason = reason;
-      banReasons.add('${stat.host}:$reason');
+    if (!timeoutLike) return;
+    final now = DateTime.now();
+    stat.recentTimeouts.add(now);
+    stat.recentTimeouts.removeWhere((t) => now.difference(t) > banWindow);
+    final windowN = stat.recentTimeouts.length;
+    if (stat.blacklistedUntil != null) return;
+    if (stat.consecutiveErrors >= banAfterErrors || windowN >= banAfterErrors) {
+      stat.blacklistedUntil = now.add(ban);
+      final why = windowN >= banAfterErrors
+          ? '$reason n=$windowN/30s'
+          : '$reason n=${stat.consecutiveErrors}';
+      stat.lastBanReason = why;
+      banReasons.add('${stat.host}:$why');
       VodProxyLog.log(
-        'ban host=${stat.host} reason=$reason n=${stat.consecutiveErrors} '
-        'cooldown=${ban.inSeconds}s',
+        'ban host=${stat.host} reason=$why cooldown=${ban.inSeconds}s',
       );
     }
   }
@@ -230,26 +251,26 @@ class VodHostPool {
   }
 
   String describe({bool trafficOnly = true}) {
-    final list = trafficOnly ? _hosts.where((h) => h.hasTraffic) : _hosts;
+    final list = trafficOnly ? _hosts.where((h) => h.hasChunkTraffic) : _hosts;
     if (list.isEmpty) return '-';
     return list
         .map((h) {
           final mbps = (h.emaBps * 8 / 1e6).toStringAsFixed(2);
           final ban = h.blacklistedUntil != null ? ' banned' : '';
-          return '${h.host} ${mbps}Mbps ok=${h.successes} err=${h.errors}$ban';
+          return '${h.host} ${mbps}Mbps ok=${h.chunkSuccesses} err=${h.chunkErrors}$ban';
         })
         .join(', ');
   }
 
   String sessionHostSummary() {
-    final list = _hosts.where((h) => h.hasTraffic).toList();
+    final list = _hosts.where((h) => h.hasChunkTraffic).toList();
     if (list.isEmpty) return '-';
     return list
         .map((h) {
           final avg = (h.emaBps * 8 / 1e6).toStringAsFixed(2);
           final peak = (h.peakBps * 8 / 1e6).toStringAsFixed(2);
-          return '${h.host} bytes=${h.bytes} avg=${avg}Mbps peak=${peak}Mbps '
-              'ok=${h.successes} err=${h.errors} ttfb=${h.avgTtfbMs.toStringAsFixed(0)}ms';
+          return '${h.host} bytes=${h.chunkBytes} avg=${avg}Mbps peak=${peak}Mbps '
+              'ok=${h.chunkSuccesses} err=${h.chunkErrors} ttfb=${h.avgTtfbMs.toStringAsFixed(0)}ms';
         })
         .join('; ');
   }

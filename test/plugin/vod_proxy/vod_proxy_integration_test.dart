@@ -272,6 +272,35 @@ void main() {
     expect(session.uniqueFetchedBytes, lessThanOrEqualTo(payload.length + 16 * 1024));
   }, timeout: const Timeout(Duration(seconds: 25)));
 
+  test('pause flushes session_end without closing', () async {
+    final cdn = _MockCdn(payload);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    await _fetchAll(proxyUrl!);
+    VodHttpProxy.instance.flushSessionEnd(reason: 'pause');
+    expect(VodHttpProxy.instance.hasActiveSession, isTrue);
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('session_end')).length,
+      1,
+    );
+    VodHttpProxy.instance.flushSessionEnd(reason: 'pause');
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('session_end')).length,
+      1,
+    );
+    VodHttpProxy.instance.closeAll(reason: 'dispose');
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('session_end')).length,
+      2,
+    );
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
   test('closeAll stops the session and writes session_end', () async {
     final cdn = _MockCdn(payload);
     await cdn.start();

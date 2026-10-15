@@ -56,6 +56,39 @@ abstract final class VodProxyLog {
 
   static void play(String message) => log(message, tag: kPlayLogTag);
 
+  /// Never log signed CDN URLs or mpv stream ids like `audio2`.
+  static String safeTitle(String? title) {
+    if (title == null) return '-';
+    final t = title.trim().replaceAll(RegExp(r'[\r\n]+'), ' ');
+    if (t.isEmpty || t == '-') return '-';
+    final lower = t.toLowerCase();
+    if (lower.startsWith('http://') ||
+        lower.startsWith('https://') ||
+        lower.startsWith('edl://')) {
+      return '-';
+    }
+    if (RegExp(r'^(video|audio)\d+$', caseSensitive: false).hasMatch(t)) {
+      return '-';
+    }
+    if (t.contains('deadline=') ||
+        t.contains('os=') ||
+        t.contains('bilivideo') ||
+        t.contains('akamaized')) {
+      return '-';
+    }
+    return t;
+  }
+
+  static String hostOnly(String? url) {
+    if (url == null || url.isEmpty) return '-';
+    final host = Uri.tryParse(url)?.host;
+    if (host == null || host.isEmpty) return '-';
+    if (host == '127.0.0.1' || host == 'localhost' || host == '::1') {
+      return '-';
+    }
+    return host;
+  }
+
   static void _emit(String message, {required String tag}) {
     final line = '[$tag] $message';
     debugPrint(line);
@@ -83,7 +116,7 @@ abstract final class VodProxyLog {
       await file.writeAsString(
         '${jsonEncode({'t': DateTime.now().toIso8601String(), 'line': line})}\n',
         mode: FileMode.writeOnlyAppend,
-        flush: false,
+        flush: true,
       );
       final len = await file.length();
       if (len > _maxFileBytes) {

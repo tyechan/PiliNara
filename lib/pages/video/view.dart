@@ -667,6 +667,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     } else if (state == .paused) {
       introController.cancelTimer();
       ctr.showDanmaku = false;
+      ctr.flushProxySessionOnBackground();
+    } else if (state == .detached) {
+      ctr.flushProxySessionOnBackground(reason: 'detach');
     }
   }
 

@@ -176,6 +176,19 @@ class VideoDetailController extends GetxController
   late VideoItem firstVideo;
   String? videoUrl;
   String? audioUrl;
+
+  String? _playbackTitle() {
+    try {
+      if (isFileSource) return entry.title;
+      final fromIntro = isUgc
+          ? ugcIntroCtr.videoDetail.value.title
+          : pgcIntroCtr.videoDetail.value.title;
+      if (fromIntro != null && fromIntro.isNotEmpty) return fromIntro;
+    } catch (_) {}
+    final fromArgs = args['title'];
+    if (fromArgs is String && fromArgs.isNotEmpty) return fromArgs;
+    return null;
+  }
   Duration? defaultST;
   Duration? playedTime;
   String playedTimePos(bool hasParams) {
@@ -999,6 +1012,9 @@ class VideoDetailController extends GetxController
       height: firstVideo.height,
       volume: volume,
       autoFullScreenFlag: autoFullScreenFlag,
+      title: _playbackTitle(),
+      codec: firstVideo.codecs,
+      fps: firstVideo.frameRate,
     );
 
     // 检查 controller 是否已关闭，如果已关闭则跳过后续的资源加载操作

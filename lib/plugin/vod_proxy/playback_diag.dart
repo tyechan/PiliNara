@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:media_kit/media_kit.dart';
 
@@ -25,10 +24,22 @@ class PlaybackDiag {
   bool _eofAudio = false;
   String? _lastHwdec;
   bool _directMode = true;
+  String _videoHost = '-';
+  String _audioHost = '-';
+  String? _dashCodec;
 
-  void attach(Player player, {required bool proxy}) {
+  void attach(
+    Player player, {
+    required bool proxy,
+    String? videoHost,
+    String? audioHost,
+    String? dashCodec,
+  }) {
     detach();
     _directMode = !proxy;
+    _videoHost = (videoHost == null || videoHost.isEmpty) ? '-' : videoHost;
+    _audioHost = (audioHost == null || audioHost.isEmpty) ? '-' : audioHost;
+    _dashCodec = dashCodec;
     _loggedFirstFrame = false;
     _firstFrameAt = null;
     _startedAt = DateTime.now();
@@ -142,7 +153,9 @@ class PlaybackDiag {
               : _firstFrameAt!.difference(_startedAt!).inMilliseconds;
           final hwdec = prop('hwdec-current');
           _lastHwdec = hwdec;
-          final codec = prop('video-codec');
+          var codec = prop('video-codec');
+          if (codec.isEmpty) codec = prop('video-format');
+          if (codec.isEmpty) codec = _dashCodec ?? '';
           final fps = prop('estimated-vf-fps');
           VodProxyLog.play(
             'mpv first-frame hwdec=$hwdec codec=$codec fps=$fps pos=${timePos.inMilliseconds}ms',
@@ -156,7 +169,7 @@ class PlaybackDiag {
           'mpv cache cache-speed=${prop('cache-speed')} '
           'demuxer-cache-duration=${prop('demuxer-cache-duration')} '
           'paused-for-cache=${prop('paused-for-cache')} '
-          'host=${VodHttpProxy.instance.preferredHost ?? '-'}',
+          'videoHost=$_videoHost audioHost=$_audioHost',
         );
       }
 

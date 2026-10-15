@@ -163,6 +163,41 @@ void main() {
     expect(pool.describe(), isNot(contains('mirrorhw')));
   });
 
+  test('compact stats omit probe-only hosts', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw]);
+    pool.recordSuccess(hw, bytes: 128 * 1024, elapsedMs: 200, probe: true);
+    pool.recordSuccess(ali, bytes: 512 * 1024, elapsedMs: 100);
+    expect(pool.describe(), contains('mirrorali'));
+    expect(pool.describe(), isNot(contains('mirrorhw')));
+    expect(pool.sessionHostSummary(), isNot(contains('mirrorhw')));
+    pool.recordFailure(hw, reason: 'TimeoutException', probe: true);
+    expect(pool.describe(), isNot(contains('mirrorhw')));
+    pool.recordFailure(hw, reason: 'TimeoutException');
+    expect(pool.describe(), contains('mirrorhw'));
+  });
+
+  test('3 timeouts in 30s ban even when successes interleave', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw], random: Random(1));
+    pool.recordSuccess(ali, bytes: 256 * 1024, elapsedMs: 100);
+    pool.recordFailure(ali, reason: 'TimeoutException');
+    pool.recordSuccess(ali, bytes: 256 * 1024, elapsedMs: 100);
+    pool.recordFailure(ali, reason: 'TimeoutException');
+    pool.recordSuccess(ali, bytes: 256 * 1024, elapsedMs: 100);
+    expect(
+      pool.available.map((h) => h.host),
+      contains('upos-sz-mirrorali.bilivideo.com'),
+    );
+    pool.recordFailure(ali, reason: 'TimeoutException');
+    expect(
+      pool.available.map((h) => h.host),
+      isNot(contains('upos-sz-mirrorali.bilivideo.com')),
+    );
+  });
+
   test('unban after cooldown logs a retry', () {
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
     const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
