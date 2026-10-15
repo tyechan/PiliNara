@@ -1358,6 +1358,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         dashCodec: _dashCodec,
       );
       _diag.onEarlyEnd = _openedViaProxy ? _recoverProxyVideo : null;
+      VodHttpProxy.instance.onCursorStuck = _openedViaProxy
+          ? () => _scheduleProxyFallback('cursor-stuck')
+          : null;
     }
   }
 
@@ -2768,6 +2771,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         }
         break;
       case AppLifecycleState.resumed:
+        if (Platform.isAndroid && !isLive) {
+          VodHttpProxy.instance.resumeStats();
+        }
         _cancelAutoAudioOnlyTimer();
         if (_autoAudioState == AutoAudioOnlyState.autoAudioOnly) {
           if (!_autoAudioRestoreInProgress) {

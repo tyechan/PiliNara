@@ -21,6 +21,7 @@ class VodHttpProxy {
   bool _forceDirectOnce = false;
   DateTime? lastRequestAt;
   int requestsServed = 0;
+  void Function()? onCursorStuck;
 
   bool get isRunning => _server != null && port != null;
 
@@ -48,6 +49,7 @@ class VodHttpProxy {
     _forceDirectOnce = false;
     requestsServed = 0;
     lastRequestAt = null;
+    onCursorStuck = null;
     final server = _server;
     _server = null;
     port = null;
@@ -76,6 +78,12 @@ class VodHttpProxy {
     if (_sessions.isEmpty) return;
     for (final session in _sessions.values) {
       session.logSessionEnd(reason: reason);
+    }
+  }
+
+  void resumeStats() {
+    for (final session in _sessions.values) {
+      session.startStats();
     }
   }
 
@@ -185,17 +193,21 @@ class VodHttpProxy {
     int workers = 4,
     Duration? attemptTimeout,
     Duration? fetchBudget,
+    Duration? cursorWatchdog,
+    List<String> extras = const [],
   }) async {
     if (!await ensureStarted()) return null;
     final id = _register(
       kind: kind,
       primary: primary,
-      extras: const [],
+      extras: extras,
       chunkSize: chunkSize,
       windowBytes: windowBytes,
       workers: workers,
       attemptTimeout: attemptTimeout,
       fetchBudget: fetchBudget,
+      cursorWatchdog: cursorWatchdog,
+      expandHosts: false,
     );
     try {
       await _sessions[id]!.ensureSize();
@@ -217,9 +229,13 @@ class VodHttpProxy {
     int? workers,
     Duration? attemptTimeout,
     Duration? fetchBudget,
+    Duration? cursorWatchdog,
+    bool expandHosts = true,
   }) {
     final id = '$kind${++_seq}';
-    final candidates = VodHostPool.buildCandidates(primary, extras: extras);
+    final candidates = expandHosts
+        ? VodHostPool.buildCandidates(primary, extras: extras)
+        : [primary, ...extras];
     int fallbackChunk() {
       try {
         return Pref.vodMultiConnChunkKb * 1024;
@@ -244,7 +260,7 @@ class VodHttpProxy {
       }
     }
 
-    _sessions[id] = VodSession(
+    final session = VodSession(
       id: id,
       kind: kind,
       candidates: candidates.isEmpty ? [primary] : candidates,
@@ -253,7 +269,10 @@ class VodHttpProxy {
       workers: workers ?? fallbackWorkers(),
       attemptTimeout: attemptTimeout ?? const Duration(seconds: 6),
       fetchBudget: fetchBudget ?? const Duration(seconds: 45),
+      cursorWatchdog: cursorWatchdog ?? const Duration(seconds: 8),
     );
+    session.onCursorStuck = () => onCursorStuck?.call();
+    _sessions[id] = session;
     return id;
   }
 

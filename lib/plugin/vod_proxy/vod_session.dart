@@ -29,7 +29,10 @@ class VodSession {
     required this.workers,
     this.attemptTimeout = const Duration(seconds: 6),
     this.fetchBudget = const Duration(seconds: 45),
-  }) : pool = VodHostPool(candidates);
+    this.cursorWatchdog = const Duration(seconds: 8),
+  }) : pool = VodHostPool(candidates) {
+    pool.onBan = (host) => _kickFetches(fromHost: host);
+  }
 
   final String id;
   final String kind;
@@ -39,6 +42,8 @@ class VodSession {
   final int workers;
   final Duration attemptTimeout;
   final Duration fetchBudget;
+  final Duration cursorWatchdog;
+  void Function()? onCursorStuck;
 
   final HttpClient _client = HttpClient()
     ..userAgent = BrowserUa.pc
@@ -66,6 +71,8 @@ class VodSession {
   Timer? _statsTimer;
   int _readEpoch = 0;
   int _activeReads = 0;
+  Completer<void> _kick = Completer<void>();
+  final Map<int, String> _inflightHost = {};
 
   bool get isClosed => _closed;
 
@@ -114,6 +121,14 @@ class VodSession {
         'size=${fileSize ?? -1} hosts=${pool.describe()}',
       );
     });
+  }
+
+  void _kickFetches({String? fromHost}) {
+    if (fromHost != null) {
+      VodProxyLog.log('requeue id=$id from=$fromHost');
+    }
+    if (!_kick.isCompleted) _kick.complete();
+    _kick = Completer<void>();
   }
 
   int get _aheadBytes {
@@ -297,37 +312,90 @@ class VodSession {
     required int epoch,
   }) async {
     final deadline = DateTime.now().add(fetchBudget);
+    final started = DateTime.now();
+    final expected = _chunkLen(idx);
+    final range = ByteRange(idx * chunkSize, idx * chunkSize + expected);
     Object? lastError;
+    var raced = false;
+    var stuckSignaled = false;
     while (!_closed && epoch == _readEpoch) {
+      final cached = _chunks[idx];
+      if (cached != null) {
+        if (cached.length == expected) return cached;
+        _chunks.remove(idx);
+        lastError = 'bad-length got=${cached.length} want=$expected';
+      }
       final remaining = deadline.difference(DateTime.now());
       if (remaining.inMilliseconds <= 0) {
-        final start = idx * chunkSize;
         throw VodServeAbort(
-          ByteRange(start, start + _chunkLen(idx)),
+          range,
           lastError ?? 'deadline ${fetchBudget.inSeconds}s',
         );
       }
+      if (lastError is VodServeAbort) throw lastError as VodServeAbort;
+
+      unawaited(
+        _chunk(idx, urgent: urgent).then<void>((_) {}, onError: (Object e) {
+          lastError = e;
+        }),
+      );
+
+      final slice = remaining < cursorWatchdog ? remaining : cursorWatchdog;
       try {
-        final chunk = await _chunk(idx, urgent: urgent);
-        final expected = _chunkLen(idx);
-        if (chunk.length == expected) return chunk;
-        _chunks.remove(idx);
-        lastError = 'bad-length got=${chunk.length} want=$expected';
+        final inflight = _inflight[idx];
+        await Future.any<void>([
+          if (inflight != null) inflight.then<void>((_) {}),
+          Future<void>.delayed(slice),
+          _kick.future,
+        ]);
+      } catch (_) {}
+
+      final ready = _chunks[idx];
+      if (ready != null && ready.length == expected) return ready;
+      if (lastError is VodServeAbort) throw lastError as VodServeAbort;
+      if (_closed || epoch != _readEpoch) throw const _SessionClosed();
+
+      final waited = DateTime.now().difference(started);
+      if (!raced && waited >= cursorWatchdog) {
+        raced = true;
         VodProxyLog.log(
-          'retry id=$id range=${ByteRange(idx * chunkSize, idx * chunkSize + expected)} '
-          'from=- reason=$lastError',
+          'watchdog id=$id idx=$idx range=$range '
+          'reason=no-progress ${cursorWatchdog.inSeconds}s race',
         );
-      } on _SessionClosed {
-        rethrow;
-      } on VodServeAbort {
-        rethrow;
-      } catch (e) {
-        lastError = e;
-        VodProxyLog.log('read-retry id=$id idx=$idx reason=$e');
+        unawaited(_raceChunk(idx, avoidHost: _inflightHost[idx]));
+      } else if (raced &&
+          !stuckSignaled &&
+          waited >= cursorWatchdog + cursorWatchdog) {
+        stuckSignaled = true;
+        VodProxyLog.log('abort id=$id range=$range reason=cursor-watchdog');
+        onCursorStuck?.call();
+        throw VodServeAbort(range, 'cursor-watchdog');
       }
-      await Future<void>.delayed(const Duration(milliseconds: 80));
     }
     throw const _SessionClosed();
+  }
+
+  Future<void> _raceChunk(int idx, {String? avoidHost}) async {
+    try {
+      final size = fileSize;
+      if (size == null || size <= 0) return;
+      final start = idx * chunkSize;
+      final end = min(start + chunkSize, size);
+      final fetched = await _fetchRange(
+        ByteRange(start, end),
+        urgent: true,
+        avoidHost: avoidHost,
+      );
+      final want = end - start;
+      if (fetched.bytes.length != want) return;
+      _chunks[idx] = fetched.bytes;
+      _fetchedChunks.add(idx);
+      _kickFetches();
+    } on _SessionClosed {
+      // Player moved on.
+    } catch (e) {
+      VodProxyLog.log('race-fail id=$id idx=$idx $e');
+    }
   }
 
   Future<Uint8List> _chunk(int idx, {bool urgent = false}) {
@@ -367,45 +435,62 @@ class VodSession {
   Future<({Uint8List bytes, int total})> _fetchRange(
     ByteRange range, {
     required bool urgent,
+    String? avoidHost,
   }) async {
     Object? lastError;
-    String? lastHost;
+    String? lastHost = avoidHost;
     final deadline = DateTime.now().add(fetchBudget);
+    final idx = range.start ~/ chunkSize;
     var attempt = 0;
     while (DateTime.now().isBefore(deadline)) {
       if (_closed) throw const _SessionClosed();
       attempt++;
       final remaining = deadline.difference(DateTime.now());
       if (remaining.inMilliseconds < 50) break;
-      final allowBanned = attempt >= 4;
-      String? url;
-      if (attempt >= 8 && pool.allUrls.isNotEmpty) {
-        url = pool.allUrls[(attempt - 1) % pool.allUrls.length];
-      } else {
-        url = pool.pickUrl(avoidHost: lastHost, allowBanned: allowBanned);
+      final allowBanned = attempt >= 4 && pool.available.isEmpty;
+      String? url = pool.pickUrl(
+        avoidHost: lastHost,
+        allowBanned: allowBanned,
+      );
+      if (url == null || url.isEmpty) {
+        final primary = pool.primaryUrl;
+        if (primary.isNotEmpty &&
+            (!pool.isUrlBanned(primary) || allowBanned)) {
+          url = primary;
+        }
       }
       if (url == null || url.isEmpty) {
-        url = pool.primaryUrl;
+        lastError = 'no-host';
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        continue;
       }
-      if (url.isEmpty) break;
       lastHost = Uri.tryParse(url)?.host;
+      if (lastHost != null) _inflightHost[idx] = lastHost;
       final perTry = remaining < attemptTimeout ? remaining : attemptTimeout;
       try {
-        final result = await _get(url, range).timeout(perTry);
+        final result = await _getOrKick(url, range, perTry);
         if (result.bytes.length != range.length) {
           retries++;
-          pool.recordFailure(url, reason: 'short-read');
+          final banned = pool.recordFailure(url, reason: 'short-read');
           VodProxyLog.log(
             'retry id=$id range=$range from=$lastHost reason=short-read '
             'got=${result.bytes.length} want=${range.length}',
           );
           lastError = StateError('short-read');
+          if (banned) _kickFetches(fromHost: lastHost);
           continue;
         }
         return result;
+      } on _HostKicked {
+        retries++;
+        lastError = 'kicked';
+        VodProxyLog.log(
+          'retry id=$id range=$range from=$lastHost reason=kicked',
+        );
+        continue;
       } on _Forbidden {
         retries++;
-        pool.recordFailure(
+        final banned = pool.recordFailure(
           url,
           reason: '403',
           ban: const Duration(seconds: 45),
@@ -414,21 +499,47 @@ class VodSession {
           'retry id=$id range=$range from=$lastHost reason=403',
         );
         lastError = _Forbidden();
+        if (banned) _kickFetches(fromHost: lastHost);
       } on _SessionClosed {
         rethrow;
       } catch (e) {
         if (_closed) throw const _SessionClosed();
         retries++;
-        pool.recordFailure(url, reason: e.toString());
+        final banned = pool.recordFailure(url, reason: e.toString());
         VodProxyLog.log(
           'retry id=$id range=$range from=$lastHost reason=$e',
         );
         lastError = e;
+        if (banned) _kickFetches(fromHost: lastHost);
       }
     }
     final why = lastError ?? 'deadline ${fetchBudget.inSeconds}s n=$attempt';
     VodProxyLog.log('abort id=$id range=$range reason=$why');
     throw VodServeAbort(range, why);
+  }
+
+  Future<({Uint8List bytes, int total})> _getOrKick(
+    String url,
+    ByteRange range,
+    Duration perTry,
+  ) {
+    final done = Completer<({Uint8List bytes, int total})>();
+    var settled = false;
+    void settle(void Function() fn) {
+      if (settled) return;
+      settled = true;
+      fn();
+    }
+
+    _get(url, range).timeout(perTry).then(
+      (result) => settle(() => done.complete(result)),
+      onError: (Object e, StackTrace st) =>
+          settle(() => done.completeError(e, st)),
+    );
+    _kick.future.then((_) {
+      settle(() => done.completeError(const _HostKicked()));
+    }, onError: (_) {});
+    return done.future;
   }
 
   Future<({Uint8List bytes, int total})> _get(
@@ -556,6 +667,8 @@ class VodSession {
     } else {
       _endLogged = true;
     }
+    _statsTimer?.cancel();
+    _statsTimer = null;
     VodProxyLog.log(
       'session_end id=$id kind=$kind reason=$reason '
       'served=${_fmtBytes(uniqueServedBytes)} '
@@ -574,14 +687,20 @@ class VodSession {
     _readEpoch++;
     _statsTimer?.cancel();
     _statsTimer = null;
+    _kickFetches();
     logSessionEnd(reason: reason);
     _chunks.clear();
     _inflight.clear();
+    _inflightHost.clear();
     _client.close(force: true);
   }
 }
 
 class _Forbidden implements Exception {}
+
+class _HostKicked implements Exception {
+  const _HostKicked();
+}
 
 class _SessionClosed implements Exception {
   const _SessionClosed();

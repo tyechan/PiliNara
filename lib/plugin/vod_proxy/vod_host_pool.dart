@@ -44,6 +44,7 @@ class VodHostPool {
   bool overseasWins = false;
   final List<String> banReasons = <String>[];
   int unbanCount = 0;
+  void Function(String host)? onBan;
 
   static const int banAfterErrors = 3;
   static const Duration defaultBan = Duration(seconds: 30);
@@ -96,16 +97,21 @@ class VodHostPool {
 
   List<String> get allUrls => _hosts.map((h) => h.url).toList();
 
+  bool isUrlBanned(String url) {
+    _refreshBans();
+    return _find(url)?.blacklistedUntil != null;
+  }
+
   /// Spread workers across the 2–3 best hosts, weighted by measured throughput.
-  /// [allowBanned] is a last-resort path after other hosts keep failing.
+  /// Never returns a banned host unless [allowBanned] and nothing else is left.
   String? pickUrl({String? avoidHost, bool allowBanned = false}) {
     var open = available;
-    if (open.isEmpty && allowBanned) {
-      open = [..._hosts];
-    }
     if (open.isEmpty) {
-      if (_hosts.isEmpty) return null;
-      return _hosts[_rotate++ % _hosts.length].url;
+      if (allowBanned && _hosts.isNotEmpty) {
+        open = [..._hosts];
+      } else {
+        return null;
+      }
     }
     if (avoidHost != null) {
       final avoid = avoidHost.toLowerCase();
@@ -114,7 +120,11 @@ class VodHostPool {
         open = filtered;
       } else if (allowBanned) {
         final banned = _hosts.where((h) => h.host != avoid).toList();
-        if (banned.isNotEmpty) open = banned;
+        if (banned.isNotEmpty) {
+          open = banned;
+        } else {
+          return null;
+        }
       }
     }
     final top = _ranked(open).take(3).toList();
@@ -191,16 +201,17 @@ class VodHostPool {
     stat.chunkSuccesses++;
   }
 
-  void recordFailure(
+  /// Returns true when this failure newly bans the host.
+  bool recordFailure(
     String url, {
     required String reason,
     Duration ban = defaultBan,
     bool probe = false,
   }) {
     final stat = _find(url);
-    if (stat == null) return;
+    if (stat == null) return false;
     stat.errors++;
-    if (probe) return;
+    if (probe) return false;
     stat.chunkErrors++;
     stat.consecutiveErrors++;
     final timeoutLike =
@@ -210,12 +221,12 @@ class VodHostPool {
         reason.contains('Connection reset') ||
         reason == '403' ||
         reason == 'short-read';
-    if (!timeoutLike) return;
+    if (!timeoutLike) return false;
     final now = DateTime.now();
     stat.recentTimeouts.add(now);
     stat.recentTimeouts.removeWhere((t) => now.difference(t) > banWindow);
     final windowN = stat.recentTimeouts.length;
-    if (stat.blacklistedUntil != null) return;
+    if (stat.blacklistedUntil != null) return false;
     if (stat.consecutiveErrors >= banAfterErrors || windowN >= banAfterErrors) {
       stat.blacklistedUntil = now.add(ban);
       final why = windowN >= banAfterErrors
@@ -226,7 +237,10 @@ class VodHostPool {
       VodProxyLog.log(
         'ban host=${stat.host} reason=$why cooldown=${ban.inSeconds}s',
       );
+      onBan?.call(stat.host);
+      return true;
     }
+    return false;
   }
 
   void markOverseasWinnerIfNeeded() {
@@ -260,10 +274,12 @@ class VodHostPool {
     cur.lastBanReason = 'prefer-next';
     banReasons.add('${cur.host}:prefer-next');
     VodProxyLog.log('ban host=${cur.host} reason=prefer-next n=1 cooldown=30s');
+    onBan?.call(cur.host);
     return preferred?.host;
   }
 
   String describe({bool trafficOnly = true}) {
+    _refreshBans();
     final list = trafficOnly ? _hosts.where((h) => h.hasChunkTraffic) : _hosts;
     if (list.isEmpty) return '-';
     return list

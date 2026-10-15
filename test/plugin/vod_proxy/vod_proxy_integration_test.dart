@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -14,6 +15,9 @@ class _MockCdn {
     this.widerWindow = false,
     this.timeoutAt,
     this.timeoutFor = const Duration(seconds: 2),
+    this.hangEveryMatching = false,
+    this.hangAfterStart = false,
+    this.advertiseHost = '127.0.0.1',
   });
 
   final Uint8List bytes;
@@ -21,11 +25,16 @@ class _MockCdn {
   final bool widerWindow;
   final int? timeoutAt;
   final Duration timeoutFor;
+  final bool hangEveryMatching;
+  final bool hangAfterStart;
+  final String advertiseHost;
   HttpServer? _server;
   int resets = 0;
   int timeouts = 0;
+  int rangeHits = 0;
+  int requests = 0;
 
-  String get url => 'http://127.0.0.1:${_server!.port}/file.bin';
+  String get url => 'http://$advertiseHost:${_server!.port}/file.bin';
 
   Future<void> start() async {
     _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -59,7 +68,16 @@ class _MockCdn {
           await response.close();
           return;
         }
-        if (timeoutAt != null && start == timeoutAt && timeouts < 1) {
+        requests++;
+        if (start == (timeoutAt ?? -1) || (hangAfterStart && start > 0)) {
+          rangeHits++;
+        }
+        final hangThis = hangAfterStart
+            ? start > 0
+            : timeoutAt != null &&
+                start == timeoutAt &&
+                (hangEveryMatching || timeouts < 1);
+        if (hangThis) {
           timeouts++;
           await Future<void>.delayed(timeoutFor);
           (await response.detachSocket()).destroy();
@@ -183,6 +201,63 @@ void main() {
     expect(
       VodProxyLog.memoryLines.where((l) => l.contains('abort id=')),
       isEmpty,
+    );
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('banned host is not retried for the cursor chunk; other host serves it', () async {
+    final bad = _MockCdn(
+      payload,
+      timeoutAt: 32 * 1024,
+      timeoutFor: const Duration(seconds: 5),
+      hangEveryMatching: true,
+      advertiseHost: '127.0.0.1',
+    );
+    final good = _MockCdn(payload, advertiseHost: 'localhost');
+    await bad.start();
+    await good.start();
+    addTearDown(bad.stop);
+    addTearDown(good.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      bad.url,
+      extras: [good.url],
+      chunkSize: 16 * 1024,
+      windowBytes: 64 * 1024,
+      workers: 2,
+      attemptTimeout: const Duration(seconds: 4),
+      fetchBudget: const Duration(seconds: 10),
+      cursorWatchdog: const Duration(seconds: 8),
+    );
+    expect(proxyUrl, isNotNull);
+    final session = VodHttpProxy.instance.debugSessions.first;
+    final fetch = _fetchAll(proxyUrl!).timeout(const Duration(seconds: 20));
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+      session.pool.recordFailure(bad.url, reason: 'TimeoutException');
+    }
+    final got = await fetch;
+    expect(got, payload);
+    expect(good.requests, greaterThan(0));
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('ban host=127.0.0.1')),
+      isTrue,
+    );
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('requeue id=')),
+      isTrue,
+    );
+    final afterBan = VodProxyLog.memoryLines.skipWhile(
+      (l) => !l.contains('ban host=127.0.0.1'),
+    );
+    expect(
+      afterBan.where(
+        (l) =>
+            l.contains('retry id=') &&
+            l.contains('range=bytes 32768-49151') &&
+            l.contains('from=127.0.0.1') &&
+            !l.contains('kicked'),
+      ),
+      isEmpty,
+      reason: 'cursor chunk must not keep retrying the banned host',
     );
   }, timeout: const Timeout(Duration(seconds: 25)));
 

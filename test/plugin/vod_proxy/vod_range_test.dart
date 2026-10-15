@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -218,7 +219,7 @@ void main() {
     );
   });
 
-  test('pickUrl can reuse a banned host as last resort', () {
+  test('pickUrl never retries a banned host while others are open', () {
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
     const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
     final pool = VodHostPool([ali, hw], random: Random(1));
@@ -229,6 +230,21 @@ void main() {
       pool.available.map((h) => h.host),
       isNot(contains('upos-sz-mirrorali.bilivideo.com')),
     );
+    for (var i = 0; i < 12; i++) {
+      expect(
+        Uri.parse(pool.pickUrl()!).host,
+        'upos-sz-mirrorhw.bilivideo.com',
+      );
+      expect(
+        Uri.parse(pool.pickUrl(allowBanned: true)!).host,
+        'upos-sz-mirrorhw.bilivideo.com',
+      );
+    }
+    pool.recordFailure(hw, reason: 'TimeoutException');
+    pool.recordFailure(hw, reason: 'TimeoutException');
+    pool.recordFailure(hw, reason: 'TimeoutException');
+    expect(pool.available, isEmpty);
+    expect(pool.pickUrl(), isNull);
     expect(
       Uri.parse(pool.pickUrl(allowBanned: true)!).host,
       anyOf(
@@ -236,16 +252,25 @@ void main() {
         'upos-sz-mirrorhw.bilivideo.com',
       ),
     );
-    pool.recordFailure(hw, reason: 'TimeoutException');
-    pool.recordFailure(hw, reason: 'TimeoutException');
-    pool.recordFailure(hw, reason: 'TimeoutException');
-    expect(pool.available, isEmpty);
+  });
+
+  test('describe refreshes bans and logs unban after cooldown', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw], random: Random(1));
+    for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+      pool.recordFailure(ali, reason: 'TimeoutException');
+    }
+    final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
+    banned.blacklistedUntil =
+        DateTime.now().subtract(const Duration(seconds: 1));
+    pool.describe();
+    expect(banned.blacklistedUntil, isNull);
     expect(
-      Uri.parse(pool.pickUrl(allowBanned: true)!).host,
-      anyOf(
-        'upos-sz-mirrorali.bilivideo.com',
-        'upos-sz-mirrorhw.bilivideo.com',
+      VodProxyLog.memoryLines.any(
+        (l) => l.contains('unban host=upos-sz-mirrorali.bilivideo.com'),
       ),
+      isTrue,
     );
   });
 
