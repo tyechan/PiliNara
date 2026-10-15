@@ -15,11 +15,21 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_ui/material_ui.dart';
 
+final _b23Regex = RegExp(r'b23\.tv/[A-Za-z0-9]{7}$', caseSensitive: false);
+
 mixin SearchVideoMixin on SearchVideoController {
+  late bool _hasJump2Video = false;
+
+  @override
+  void onInit() {
+    super.onInit();
+    _jump2Video();
+  }
+
   @override
   bool customHandleResponse(bool isRefresh, Success<SearchVideoData> response) {
-    if (isRefresh && !hasJump2Video) {
-      hasJump2Video = true;
+    if (isRefresh && !_hasJump2Video) {
+      _hasJump2Video = true;
       _onPushDetail(response.response.list);
     }
     return super.customHandleResponse(isRefresh, response);
@@ -33,47 +43,20 @@ mixin SearchVideoMixin on SearchVideoController {
       }
     } catch (_) {}
   }
-}
-
-class SearchVideoController
-    extends SearchPanelController<SearchVideoData, SearchVideoItemModel> {
-  SearchVideoController({
-    required super.keyword,
-    required super.searchType,
-    required super.tag,
-  });
-
-  bool hasJump2Video = false;
-
-  static final _b23Regex = RegExp(
-    r'b23\.tv/[A-Za-z0-9]{7}$',
-    caseSensitive: false,
-  );
-
-  @override
-  void onInit() {
-    super.onInit();
-    videoDurationType = .all;
-    videoZoneType = .all;
-    DateTime now = DateTime.now();
-    pubBeginDate = DateTime(now.year, now.month, 1, 0, 0, 0);
-    pubEndDate = DateTime(now.year, now.month, now.day, 23, 59, 59);
-    _jump2Video();
-  }
 
   Future<void> _jump2Video() async {
     if (IdUtils.avRegexExact.hasMatch(keyword)) {
-      hasJump2Video = true;
+      _hasJump2Video = true;
       PiliScheme.videoPush(
         int.parse(keyword.substring(2)),
         null,
         showDialog: false,
       );
     } else if (IdUtils.bvRegexExact.hasMatch(keyword)) {
-      hasJump2Video = true;
+      _hasJump2Video = true;
       PiliScheme.videoPush(null, keyword, showDialog: false);
     } else if (_b23Regex.hasMatch(keyword)) {
-      hasJump2Video = true;
+      _hasJump2Video = true;
       final redirectUrl = await UrlUtils.parseRedirectUrl(keyword);
       if (redirectUrl != null) {
         final matchRes = IdUtils.matchAvorBv(input: redirectUrl);
@@ -85,6 +68,25 @@ class SearchVideoController
         }
       }
     }
+  }
+}
+
+class SearchVideoController
+    extends SearchPanelController<SearchVideoData, SearchVideoItemModel> {
+  SearchVideoController({
+    required super.keyword,
+    required super.searchType,
+    required super.tag,
+  });
+
+  @override
+  void onInit() {
+    super.onInit();
+    videoDurationType = .all;
+    videoZoneType = .all;
+    DateTime now = DateTime.now();
+    pubBeginDate = DateTime(now.year, now.month, 1, 0, 0, 0);
+    pubEndDate = DateTime(now.year, now.month, now.day, 23, 59, 59);
   }
 
   @override

@@ -176,7 +176,6 @@ class ImageGridView extends StatelessWidget {
           ),
         if (picArr.length > 1)
           CustomPopupMenuItem<void>(
-            height: 42,
             onTap: () =>
                 ImageUtils.downloadImg(picArr.map((item) => item.url).toList()),
             child: const Text('保存全部', style: TextStyle(fontSize: 14)),

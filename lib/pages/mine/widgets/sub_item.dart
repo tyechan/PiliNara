@@ -17,6 +17,7 @@ class MineSubItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final heroTag = Utils.makeHeroTag(item.id);
     final label = item.type2Label;
     return GestureDetector(
@@ -25,19 +26,41 @@ class MineSubItem extends StatelessWidget {
       child: Column(
         crossAxisAlignment: .start,
         children: [
-          Stack(
-            clipBehavior: .none,
-            children: [
-              Hero(
-                tag: heroTag,
-                child: NetworkImgLayer(
-                  src: item.cover,
-                  width: 180,
-                  height: 110,
+          DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: const BorderRadius.all(Radius.circular(12)),
+              boxShadow: [
+                BoxShadow(
+                  color: theme.colorScheme.onInverseSurface.withValues(
+                    alpha: 0.4,
+                  ),
+                  offset: const Offset(6, -8),
+                  blurRadius: 0.0,
+                  spreadRadius: 0.0,
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: const BorderRadius.all(Radius.circular(12)),
+              child: SizedBox(
+                width: 180,
+                height: 110,
+                child: Stack(
+                  clipBehavior: Clip.hardEdge,
+                  children: [
+                    Hero(
+                      tag: heroTag,
+                      child: NetworkImgLayer(
+                        src: item.cover,
+                        width: 180,
+                        height: 110,
+                      ),
+                    ),
+                    PBadge(right: 6, top: 6, text: label),
+                  ],
                 ),
               ),
-              PBadge(right: 6, top: 6, text: label),
-            ],
+            ),
           ),
           const SizedBox(height: 8),
           Text(

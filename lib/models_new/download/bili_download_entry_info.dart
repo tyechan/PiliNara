@@ -45,6 +45,7 @@ class BiliDownloadEntryInfo with MultiSelectData {
   EpInfo? ep;
   final String? autoFolderTitle;
   final String? autoFolderSourceKey;
+  final int? autoFolderIndex;
   List<SegmentItemModel>? segments;
   SeasonInfo? seasonInfo;
 
@@ -188,6 +189,7 @@ class BiliDownloadEntryInfo with MultiSelectData {
     this.ep,
     this.autoFolderTitle,
     this.autoFolderSourceKey,
+    this.autoFolderIndex,
     this.segments,
     this.seasonInfo,
   });
@@ -230,6 +232,7 @@ class BiliDownloadEntryInfo with MultiSelectData {
             : null,
         autoFolderTitle: json['auto_folder_title'] as String?,
         autoFolderSourceKey: json['auto_folder_source_key'] as String?,
+        autoFolderIndex: json['auto_folder_index'] as int?,
         segments: SegmentItemModel.fromCache(json['segments']),
         seasonInfo: json['season_info'] != null
             ? SeasonInfo.fromJson(json['season_info'] as Map<String, dynamic>)
@@ -266,6 +269,7 @@ class BiliDownloadEntryInfo with MultiSelectData {
     'ep': ?ep?.toJson(),
     'auto_folder_title': ?autoFolderTitle,
     'auto_folder_source_key': ?autoFolderSourceKey,
+    'auto_folder_index': ?autoFolderIndex,
     'segments': ?segments?.map((e) => e.toJson()).toList(),
     'season_info': ?seasonInfo?.toJson(),
   };

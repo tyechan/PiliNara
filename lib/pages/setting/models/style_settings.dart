@@ -13,7 +13,6 @@ import 'package:PiliPlus/models/common/bar_hide_type.dart';
 import 'package:PiliPlus/models/common/dynamic/dynamic_badge_mode.dart';
 import 'package:PiliPlus/models/common/dynamic/up_panel_position.dart';
 import 'package:PiliPlus/models/common/home_tab_type.dart';
-import 'package:PiliPlus/models/common/mine_card_type.dart';
 import 'package:PiliPlus/models/common/mine_tab_type.dart';
 import 'package:PiliPlus/models/common/msg/msg_unread_type.dart';
 import 'package:PiliPlus/models/common/nav_bar_config.dart';
@@ -390,19 +389,6 @@ List<SettingsModel> get styleSettings => [
     title: 'Navbar编辑',
     subtitle: '删除或调换Navbar',
     leading: const Icon(Icons.toc_outlined),
-  ),
-  NormalModel(
-    onTap: (context, setState) => Get.toNamed(
-      '/barSetting',
-      arguments: {
-        'key': SettingBoxKey.mineCardSort,
-        'defaultBars': MineCardType.values,
-        'title': '我的页卡片',
-      },
-    ),
-    title: '我的页卡片编辑',
-    subtitle: '选择并排列「我的」页面显示的卡片板块',
-    leading: const Icon(Icons.person_outline),
   ),
   SwitchModel(
     title: '备注替换昵称',

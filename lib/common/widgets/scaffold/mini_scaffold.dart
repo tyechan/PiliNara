@@ -134,6 +134,10 @@ class MiniScaffoldState extends State<MiniScaffold>
     );
   }
 
+  /// 关闭当前 bottom sheet（含 LocalHistoryEntry 型）。供视频页接管共享的
+  /// MiniScaffoldState 时清掉上一页遗留的 sheet
+  void closeBottomSheet() => _currentBottomSheet?.close();
+
   PersistentBottomSheetController showBottomSheet(
     WidgetBuilder builder, {
     BoxConstraints? constraints,

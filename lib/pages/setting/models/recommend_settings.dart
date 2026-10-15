@@ -20,16 +20,16 @@ import 'package:material_ui/material_ui.dart';
 
 List<SettingsModel> get recommendSettings => [
   NormalModel(
-    title: 'buvid',
-    leading: const Icon(CustomIcons.identifier_circle),
-    getSubtitle: () => LoginUtils.buvid,
-    onTap: _showBuvidDialog,
-  ),
-  NormalModel(
     title: '首页推荐模式',
     leading: const Icon(Icons.model_training_outlined),
     getSubtitle: () => '当前:「${Pref.rcmdMode.label}」',
     onTap: _showRcmdModeDialog,
+  ),
+  NormalModel(
+    title: 'buvid',
+    leading: const Icon(CustomIcons.identifier_circle),
+    getSubtitle: () => LoginUtils.buvid,
+    onTap: _showBuvidDialog,
   ),
   SwitchModel(
     title: '保留首页推荐刷新',
@@ -89,7 +89,7 @@ List<SettingsModel> get recommendSettings => [
     },
   ),
   getListBanWordModel(
-    title: 'App推荐/热门/排行榜: 视频分区关键词过滤',
+    title: '分区关键词过滤',
     key: SettingBoxKey.banWordForZone,
     onChanged: (value) {
       VideoHttp.zoneRegExp = value;
@@ -261,7 +261,7 @@ void _showBuvidDialog(BuildContext context, VoidCallback setState) {
         autofocus: true,
         initialValue: buvid,
         onChanged: (value) => buvid = value,
-        inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r'\s'))],
+        inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r"\s"))],
       ),
       actions: [
         TextButton(

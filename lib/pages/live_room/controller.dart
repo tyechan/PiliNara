@@ -18,6 +18,7 @@ import 'package:PiliPlus/models_new/live/live_fans_medal/data.dart';
 import 'package:PiliPlus/models_new/live/live_fans_medal/item.dart';
 import 'package:PiliPlus/models_new/live/live_medal_wall/uinfo_medal.dart';
 import 'package:PiliPlus/models_new/live/live_room_info_h5/data.dart';
+import 'package:PiliPlus/models_new/live/live_room_play_info/data.dart';
 import 'package:PiliPlus/models_new/live/live_room_play_info/codec.dart';
 import 'package:PiliPlus/models_new/live/live_room_play_info/stream.dart';
 import 'package:PiliPlus/models_new/live/live_superchat/item.dart';
@@ -69,12 +70,23 @@ class LiveRoomController extends GetxController {
   );
 
   final isLoaded = false.obs;
+
+  final isUnstartedRoom = false.obs;
+  int? liveStatus;
   final roomInfoH5 = Rxn<RoomInfoH5Data>();
 
   final liveTime = Rxn<int>();
 
   // PiP 模式标志
   RxBool isInPipMode = false.obs;
+
+  // 三点菜单「应用内画中画」的触发入口，由直播页 State 绑定：
+  // 小窗流程依赖页面的路由生命周期（pop 收起），controller 自身无法发起
+  VoidCallback? onRequestInAppPip;
+
+  /// 直播页能否被 pop：页面 popScope 的 canPop 与三点菜单小窗入口共用
+  bool get canPopPage =>
+      !plPlayerController.isFullScreen.value && !plPlayerController.isDesktopPip;
 
   Timer? liveTimeTimer;
 
@@ -168,6 +180,10 @@ class LiveRoomController extends GetxController {
 
   final RxnString watchedShow = RxnString();
   Widget get watchedWidget => Obx(() {
+    // 未开播时接口给的是历史累计人数，不是当前在线
+    if (isUnstartedRoom.value) {
+      return const SizedBox.shrink();
+    }
     if (watchedShow.value case final watchedShow?) {
       return Text(
         watchedShow,
@@ -307,7 +323,11 @@ class LiveRoomController extends GetxController {
     );
     if (res case Success(:final response)) {
       if (response.liveStatus != 1) {
-        _showDialog('当前直播间未开播');
+        if (response.liveStatus == 0 || response.liveStatus == 2) {
+          _initUnstartedRoom(response);
+        } else {
+          _showDialog('当前直播间未开播');
+        }
         return;
       }
       final playurl = response.playurlInfo?.playurl;
@@ -340,10 +360,36 @@ class LiveRoomController extends GetxController {
       // 置于 initLiveUrl 之后：恢复场景的首次拉取靠该标志让 playerInit 跳过
       // 数据源重建，完成后清零，切换路线/画质才会真正重建数据源
       isReturningFromPip = false;
+      isUnstartedRoom.value = false;
       isLoaded.value = true;
     } else {
       _showDialog(res.toString());
     }
+  }
+
+  // live_status == 2 是 B 站侧的「轮播中」（轮播 UP 的投稿），同样没有 playurl_info；
+  // 本应用不解析轮播视频，只拿它当未开播聊天室，仅在文案上区分。
+  bool get isRoundRoom => liveStatus == 2;
+
+  void _initUnstartedRoom(RoomPlayInfoData response) {
+    if (isUnstartedRoom.value) {
+      return;
+    }
+    liveStatus = response.liveStatus;
+    isUnstartedRoom.value = true;
+    ruid = response.uid;
+    if (response.roomId case final roomId?) {
+      this.roomId = roomId;
+    }
+    final upId = ruid;
+    if (Accounts.heartbeat.isLogin && upId != null) {
+      LiveHttp.startLiveHeartbeat(roomId, upId);
+    }
+    if (!isLoaded.value && Accounts.heartbeat.isLogin) {
+      _fetchBlockRules();
+    }
+    startLiveMsg();
+    isLoaded.value = true;
   }
 
   // 拉取成功前为 null（含小窗恢复后的重拉窗口期），使用处需判空

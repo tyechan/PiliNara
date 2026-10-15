@@ -128,13 +128,15 @@ class DetailItem extends StatelessWidget {
                     entry: entry,
                     playContext: playContext,
                   );
-                  await Future.delayed(const Duration(milliseconds: 400));
-                  if (!context.mounted) {
-                    return;
+                  if (context.mounted) {
+                    Timer(const Duration(milliseconds: 400), () {
+                      if (context.mounted) {
+                        // ignore: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
+                        progress?.notifyListeners();
+                        onPlayReturned?.call();
+                      }
+                    });
                   }
-                  // ignore: invalid_use_of_protected_member, invalid_use_of_visible_for_testing_member
-                  progress?.notifyListeners();
-                  await onPlayReturned?.call();
                 } else {
                   final curDownload = downloadService.curDownload.value;
                   if (curDownload != null &&
@@ -598,21 +600,6 @@ class DetailItem extends StatelessWidget {
                         entry: entry,
                         isUpdate: true,
                       );
-                      SmartDialog.showToast(res ? '更新成功' : '更新失败');
-                    },
-                  ),
-                if (entry.segments != null)
-                  CustomPopupMenuItem<void>(
-                    height: 38,
-                    child: const Text('空降片段', style: TextStyle(fontSize: 13)),
-                    onTap: () => showSegmentsDetail(menuContext),
-                  ),
-                if (entry.isCompleted)
-                  CustomPopupMenuItem<void>(
-                    height: 38,
-                    child: const Text('更新空降片段', style: TextStyle(fontSize: 13)),
-                    onTap: () async {
-                      final res = await downloadService.updateSegments(entry);
                       SmartDialog.showToast(res ? '更新成功' : '更新失败');
                     },
                   ),

@@ -128,7 +128,6 @@ mixin BlockMixin on GetxController {
     bool? isBlockSource,
   }) async {
     if (isClosed) return;
-
     if (list.isNotEmpty) {
       try {
         Future<void>? future;

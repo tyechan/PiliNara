@@ -81,6 +81,10 @@ class _LiveRoomPageState extends State<LiveRoomPage>
   // 标志位：是否正在进入 PiP 模式
   bool _isEnteringPipMode = false;
 
+  // 标志位：三点菜单「应用内画中画」发起的 pop，一次性；由 _onPopInvokedWithResult 消费，
+  // 让本次收起绕过设置开关
+  bool _manualPipRequested = false;
+
   late final GlobalKey pageKey = GlobalKey();
   late final GlobalKey chatKey = GlobalKey();
   late final GlobalKey scKey = GlobalKey();
@@ -201,6 +205,7 @@ class _LiveRoomPageState extends State<LiveRoomPage>
     plPlayerController = _liveRoomController.plPlayerController
       ..addStatusLister(playerListener);
     PlPlayerController.setPlayCallBack(plPlayerController.play);
+    _liveRoomController.onRequestInAppPip = _enterLivePipManually;
 
     if (isReturningFromPip) {
       _liveRoomController.isInPipMode.value = false;
@@ -337,6 +342,11 @@ class _LiveRoomPageState extends State<LiveRoomPage>
   void didPushNext() {
     removeObserverMobile(this);
     plPlayerController.removeStatusLister(playerListener);
+    // 未开播时内容就是弹幕流本身，不能随播放状态关闭
+    if (_liveRoomController.isUnstartedRoom.value) {
+      super.didPushNext();
+      return;
+    }
 
     if (plPlayerController.playerStatus.isPlaying &&
         !isFullScreen &&
@@ -354,6 +364,9 @@ class _LiveRoomPageState extends State<LiveRoomPage>
   }
 
   void playerListener(PlayerStatus status) {
+    if (_liveRoomController.isUnstartedRoom.value) {
+      return;
+    }
     if (status.isPlaying) {
       _liveRoomController
         ..danmakuController?.resume()
@@ -383,6 +396,9 @@ class _LiveRoomPageState extends State<LiveRoomPage>
       PlPlayerController.setPlayCallBack(null);
     }
     plPlayerController.removeStatusLister(playerListener);
+    if (_liveRoomController.onRequestInAppPip == _enterLivePipManually) {
+      _liveRoomController.onRequestInAppPip = null;
+    }
     if (!isInLivePip && !_isEnteringPipMode) {
       plPlayerController.dispose();
     }
@@ -471,6 +487,9 @@ class _LiveRoomPageState extends State<LiveRoomPage>
     Widget player = Obx(
       key: playerKey,
       () {
+        if (_liveRoomController.isUnstartedRoom.value) {
+          return _unstartedPanel(width);
+        }
         if (_liveRoomController.isLoaded.value && plPlayerController.isLive) {
           final roomInfoH5 = _liveRoomController.roomInfoH5.value;
           return PLVideoPlayer(
@@ -584,7 +603,7 @@ class _LiveRoomPageState extends State<LiveRoomPage>
       );
     }
     final Widget result = popScope(
-      canPop: !isFullScreen && !plPlayerController.isDesktopPip,
+      canPop: _canPopPage,
       onPopInvokedWithResult: _onPopInvokedWithResult,
       child: player,
     );
@@ -595,9 +614,65 @@ class _LiveRoomPageState extends State<LiveRoomPage>
         : result;
   }
 
+  Widget _unstartedPanel(double width) {
+    return Obx(() {
+      final cover = _liveRoomController.roomInfoH5.value?.roomInfo?.cover;
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          if (cover != null && cover.isNotEmpty)
+            CachedNetworkImage(
+              fit: BoxFit.cover,
+              memCacheWidth: width.cacheSize(context),
+              imageUrl: ImageUtils.safeThumbnailUrl(cover),
+              placeholder: (_, _) => const SizedBox.shrink(),
+              errorBuilder: (_, _, _) => const ColoredBox(color: Colors.black),
+            )
+          else
+            Image.asset(
+              Assets.livingBackground,
+              fit: BoxFit.cover,
+              cacheWidth: width.cacheSize(context),
+            ),
+          const ColoredBox(color: Color(0x66000000)),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _liveRoomController.title.value,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 15, color: baseWhite),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _liveRoomController.isRoundRoom ? '直播未开始 轮播中' : '直播未开始',
+                    style: const TextStyle(fontSize: 13, color: baseWhite),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    });
+  }
+
+  // 本页能否被 pop 收起：popScope 的 canPop 与手动小窗入口共用同一判定
+  bool get _canPopPage => _liveRoomController.canPopPage;
+
   void _onPopInvokedWithResult(bool didPop, Object? result) {
     if (didPop) {
-      _startLivePipIfNeeded();
+      final manual = _manualPipRequested;
+      _manualPipRequested = false;
+      _startLivePipIfNeeded(manual: manual);
+    } else {
+      // pop 被拦下，手动小窗的一次性豁免不能留给下一次普通返回
+      _manualPipRequested = false;
     }
     plPlayerController.onPopInvokedWithResult(
       didPop,
@@ -606,8 +681,60 @@ class _LiveRoomPageState extends State<LiveRoomPage>
     );
   }
 
-  bool _shouldStartLivePip() {
-    if (!Pref.enableInAppPip) {
+  /// 三点菜单「应用内画中画」：不依赖设置开关，把当前直播临时收进小窗。
+  /// 复用返回键收起路径（pop → _onPopInvokedWithResult → _startLivePipIfNeeded），
+  /// 只是提前把条件凑齐：全屏的先退全屏、暂停的先续播、嵌套页先静默移除
+  Future<void> _enterLivePipManually() async {
+    if (!mounted || _isEnteringPipMode || _manualPipRequested) {
+      return;
+    }
+    if (plPlayerController.isFullScreen.value) {
+      // 全屏时返回键语义是"退出全屏"，页面本就不能被 pop；且直接 pop 会把
+      // 播放器单例的 isFullScreen 留在 true、方向也不复位。先退回半屏再走正常流程
+      final rectBeforeExit = _livePlayerRect();
+      await plPlayerController.triggerFullScreen(status: false);
+      if (!mounted) {
+        return;
+      }
+      // 退出全屏会切到半屏的布局分支（与方向是否变化无关），布局落定前
+      // _livePlayerRect() 量的还是全屏时的整屏位置，收起动画会从整屏开始。
+      // 以播放器矩形变化为落定信号；不能拿 MediaQuery.size 当信号——
+      // 移动端退全屏只是隐藏系统栏，size 并不变
+      // 量不到基线矩形（播放器未就绪，收起本来也不会有动画）时不必等
+      await PipOverlayService.awaitLayoutSettled(
+        () => rectBeforeExit == null || _livePlayerRect() != rectBeforeExit,
+      );
+      if (!mounted) {
+        return;
+      }
+    }
+    if (plPlayerController.videoController != null &&
+        !plPlayerController.playerStatus.isPlaying) {
+      // 手动进小窗是明确的播放意图
+      await plPlayerController.play();
+      if (!mounted) {
+        return;
+      }
+    }
+    if (!_canPopPage || !_shouldStartLivePip(manual: true)) {
+      SmartDialog.showToast('当前无法进入小窗');
+      return;
+    }
+    if (PipOverlayService.removeNestedVideoLikeRoutesBelow(context) > 0) {
+      // 被移除的页面要到下一帧才卸载并归还各自的播放器计数；等它们落地再 pop，
+      // 否则小窗按 X 关闭时计数未归零、播放器不会真正销毁
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) {
+        return;
+      }
+    }
+    _manualPipRequested = true;
+    Get.back();
+  }
+
+  /// [manual] 为三点菜单手动触发：不受设置开关约束
+  bool _shouldStartLivePip({bool manual = false}) {
+    if (!manual && !Pref.enableInAppPip) {
       return false;
     }
     if (LivePipOverlayService.isInPipMode) {
@@ -619,6 +746,9 @@ class _LiveRoomPageState extends State<LiveRoomPage>
     if (!plPlayerController.isLive) {
       return false;
     }
+    if (plPlayerController.videoPlayerController == null) {
+      return false;
+    }
     // 如果即将进入听视频界面，不开启小窗(没啥用，直播间没有相关入口，但还是留着吧？)
     if (Get.currentRoute == '/audio') {
       return false;
@@ -626,8 +756,8 @@ class _LiveRoomPageState extends State<LiveRoomPage>
     return true;
   }
 
-  void _startLivePipIfNeeded() {
-    if (!_shouldStartLivePip()) {
+  void _startLivePipIfNeeded({bool manual = false}) {
+    if (!_shouldStartLivePip(manual: manual)) {
       return;
     }
     // 设置小窗模式标志

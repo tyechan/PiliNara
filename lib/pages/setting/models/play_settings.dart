@@ -4,17 +4,17 @@ import 'package:PiliPlus/common/widgets/custom_icon.dart';
 import 'package:PiliPlus/models/common/super_chat_time_type.dart';
 import 'package:PiliPlus/models/common/super_chat_type.dart';
 import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
-import 'package:PiliPlus/pages/main/controller.dart';
 import 'package:PiliPlus/pages/setting/models/model.dart';
 import 'package:PiliPlus/pages/setting/pages/fullscreen_sc_size.dart';
 import 'package:PiliPlus/pages/setting/widgets/select_dialog.dart';
-import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/pages/setting/widgets/slider_dialog.dart';
+import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/bottom_progress_behavior.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/android/android_helper.dart';
+import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/ios/pip_helper.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
@@ -33,6 +33,13 @@ List<SettingsModel> get playSettings => [
     leading: Icon(CustomIcons.dm_settings),
     setKey: SettingBoxKey.enableShowDanmaku,
     defaultVal: true,
+  ),
+  const SwitchModel(
+    title: '智能防挡',
+    subtitle: '让弹幕避开画面中的人物（部分视频支持）',
+    leading: Icon(Icons.person_off_outlined),
+    setKey: SettingBoxKey.enableDanmakuMask,
+    defaultVal: false,
   ),
   if (PlatformUtils.isMobile)
     const SwitchModel(
@@ -67,6 +74,13 @@ List<SettingsModel> get playSettings => [
     leading: Icon(Icons.lock_outline),
     setKey: SettingBoxKey.showFsLockBtn,
     defaultVal: true,
+  ),
+  const SwitchModel(
+    title: '锁定后禁止重力感应旋转',
+    subtitle: '全屏锁定后不再随设备方向翻转（仅横屏视频生效）',
+    leading: Icon(Icons.screen_lock_rotation),
+    setKey: SettingBoxKey.lockFsRotation,
+    defaultVal: false,
   ),
   const SwitchModel(
     title: '锁定按钮显示在右侧',
@@ -183,11 +197,7 @@ List<SettingsModel> get playSettings => [
       leading: const Icon(Icons.pause_circle_outline),
       setKey: SettingBoxKey.pauseOnMinimize,
       defaultVal: false,
-      onChanged: (value) {
-        try {
-          Get.find<MainController>().pauseOnMinimize = value;
-        } catch (_) {}
-      },
+      onChanged: (value) => WindowController.instance.pauseOnMinimize = value,
     ),
   const SwitchModel(
     title: '启用键盘控制',
@@ -265,6 +275,7 @@ List<SettingsModel> get playSettings => [
       },
     ),
   if (PlatformUtils.isMobile)
+  if (PlatformUtils.isMobile)
     SwitchModel(
       title: '后台只听音频（实验性）',
       subtitle: '需开启「后台播放」后才生效\n进入后台或息屏一段时间后停止视频流，只保留声音；回到前台恢复画面',
@@ -307,13 +318,13 @@ List<SettingsModel> get playSettings => [
       setKey: SettingBoxKey.enableInAppPipToSystemPip,
       defaultVal: true,
     ),
-  const SwitchModel(
-    title: '画中画不加载弹幕',
-    subtitle: '当弹幕开关开启时，小窗屏蔽弹幕以获得较好的体验',
-    leading: Icon(CustomIcons.dm_off),
-    setKey: SettingBoxKey.pipNoDanmaku,
-    defaultVal: false,
-  ),
+    const SwitchModel(
+      title: '画中画不加载弹幕',
+      subtitle: '当弹幕开关开启时，小窗屏蔽弹幕以获得较好的体验',
+      leading: Icon(CustomIcons.dm_off),
+      setKey: SettingBoxKey.pipNoDanmaku,
+      defaultVal: false,
+    ),
   const SwitchModel(
     title: '全屏手势反向',
     subtitle: '默认播放器中部向上滑动进入全屏，向下退出\n开启后向下全屏，向上退出',
@@ -332,6 +343,13 @@ List<SettingsModel> get playSettings => [
     subtitle: '展示同时在看人数',
     leading: Icon(Icons.people_outlined),
     setKey: SettingBoxKey.enableOnlineTotal,
+    defaultVal: false,
+  ),
+  const SwitchModel(
+    title: '弹幕数',
+    subtitle: '展示当前播放视频的具体弹幕数',
+    leading: Icon(CustomIcons.dm_on),
+    setKey: SettingBoxKey.enableDmCount,
     defaultVal: false,
   ),
   NormalModel(

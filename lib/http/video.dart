@@ -73,9 +73,8 @@ abstract final class VideoHttp {
     if (res.data['code'] == 0) {
       List<RcmdVideoItemModel> list = <RcmdVideoItemModel>[];
       for (final i in res.data['data']['item']) {
-        final mid = safeToInt(i['owner']?['mid']);
         //过滤掉live与ad，以及拉黑用户
-        if (_filterWebRcmd(i, mid)) continue;
+        if (_filterWebRcmd(i)) continue;
         final videoItem = RcmdVideoItemModel.fromJson(i);
         if (!RecommendFilter.filterWithExempt(videoItem)) {
           list.add(videoItem);
@@ -87,36 +86,35 @@ abstract final class VideoHttp {
     }
   }
 
-  static bool _filterWebRcmd(dynamic i, int? mid) {
+  static bool _filterWebRcmd(dynamic i) {
     if (i['goto'] != 'av') return true;
     if (i['owner'] != null &&
-        GlobalData().blackMids.contains(i['owner']['mid']) &&
-        !RecommendFilter.isWhitelisted(mid)) {
+        !RecommendFilter.isWhitelisted(safeToInt(i['owner']['mid'])) &&
+        GlobalData().blackMids.contains(i['owner']['mid'])) {
       return true;
     }
     return false;
   }
 
-  static bool _filterAppRcmd(
-    dynamic i, {
-    required bool isWhitelisted,
-    required bool removeBlockedRcmd,
-  }) {
+  static bool _filterAppRcmd(dynamic i) {
     if (i['card_goto'] == 'ad_av' ||
         i['card_goto'] == 'ad_web_s' ||
         i['ad_info'] != null) {
       return true;
     }
-    if (removeBlockedRcmd && !isWhitelisted && i['can_play'] != 1) {
+    final isWhitelisted = RecommendFilter.isWhitelisted(
+      safeToInt(i['args']?['up_id']),
+    );
+    if (isWhitelisted) return false;
+    // 「屏蔽无法播放的推荐」是本 fork 的开关，上游无条件过滤
+    if (Pref.removeBlockedRcmd && i['can_play'] != 1) {
       return true;
     }
     if (i['args'] != null &&
-        GlobalData().blackMids.contains(i['args']['up_id']) &&
-        !isWhitelisted) {
+        GlobalData().blackMids.contains(i['args']['up_id'])) {
       return true;
     }
     if (enableFilter &&
-        !isWhitelisted &&
         i['args']?['tname'] != null &&
         zoneRegExp.hasMatch(i['args']['tname'])) {
       return true;
@@ -179,18 +177,8 @@ abstract final class VideoHttp {
 
     if (res.data['code'] == 0) {
       final list = <RcmdVideoItemAppModel>[];
-      final bool removeBlockedRcmd = Pref.removeBlockedRcmd;
       for (final i in res.data['data']['items']) {
-        final upMid = safeToInt(i['args']?['up_id']);
-        final isWhitelisted = RecommendFilter.isWhitelisted(upMid);
-        // 屏蔽推广和拉黑用户
-        if (_filterAppRcmd(
-          i,
-          isWhitelisted: isWhitelisted,
-          removeBlockedRcmd: removeBlockedRcmd,
-        )) {
-          continue;
-        }
+        if (_filterAppRcmd(i)) continue;
         final videoItem = RcmdVideoItemAppModel.fromJson(i);
         if (!RecommendFilter.filterWithExempt(videoItem)) {
           list.add(videoItem);
@@ -1052,14 +1040,21 @@ abstract final class VideoHttp {
         );
         if (applyFullFilter) {
           // 开关开启：全局黑名单 + 完整过滤（时长、播放量、点赞率、标题关键词、推荐屏蔽用户）
-          if (!isWhitelisted &&
-              GlobalData().blackMids.contains(i['owner']['mid'])) {
+          if (!isWhitelisted && GlobalData().blackMids.contains(i['owner']['mid'])) {
             continue;
           }
           final item = HotVideoItemModel.fromJson(i);
           if (!RecommendFilter.filterAll(item)) list.add(item);
         } else {
           list.add(HotVideoItemModel.fromJson(i));
+          // final List? others = i['others'];
+          // if (others != null && others.isNotEmpty) {
+          //   for (final j in others) {
+          //     if (_canAddRank(j)) {
+          //       list.add(HotVideoItemModel.fromJson(j));
+          //     }
+          //   }
+          // }
         }
       }
       return Success(list);

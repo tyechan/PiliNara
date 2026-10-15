@@ -528,6 +528,24 @@ class HeaderControlState extends State<HeaderControl>
                         )
                       : null,
                 ),
+                // 全屏下也提供入口（点击后先退全屏再收起）；系统 PiP 中没有控制栏，
+                // 排除。非全屏时仍按 canPopPage 收口，不摆出点了只会 toast 的入口
+                if (!plPlayerController.isDesktopPip &&
+                    !plPlayerController.isPipMode &&
+                    (isFullScreen ||
+                        videoDetailCtr.canPopPage(isPortrait: isPortrait)))
+                  ListTile(
+                    dense: true,
+                    onTap: () {
+                      Get.back();
+                      videoDetailCtr.onRequestInAppPip?.call();
+                    },
+                    leading: const Icon(
+                      Icons.picture_in_picture_alt_outlined,
+                      size: 20,
+                    ),
+                    title: const Text('应用内画中画', style: titleStyle),
+                  ),
                 if (!isFileSource) ...[
                   ListTile(
                     dense: true,
@@ -776,7 +794,11 @@ class HeaderControlState extends State<HeaderControl>
                   dense: true,
                   onTap: () {
                     Get.back();
-                    showSetDanmaku();
+                    showSetDanmaku(
+                      maskController: isFileSource
+                          ? null
+                          : videoDetailCtr.danmakuMaskController,
+                    );
                   },
                   leading: const Icon(CustomIcons.dm_settings, size: 20),
                   title: const Text('弹幕设置', style: titleStyle),
@@ -1829,62 +1851,71 @@ class HeaderControlState extends State<HeaderControl>
         !isFileSource && plPlayerController.showFSActionItem && isFSOrPip;
     showCurrTimeIfNeeded(isFullScreen);
 
-    // PlayerBar is a slotted RenderBox, not a Flex. Expanded/Spacer here
-    // throws ParentDataWidget and becomes a grey ErrorWidget in release.
     Widget? title;
     if (introController.videoDetail.value.title != null &&
         (isFullScreen ||
             ((!horizontalScreen || plPlayerController.isDesktopPip) &&
                 !isPortrait))) {
-      title = Padding(
-        key: titleKey,
-        padding: isPortrait
-            ? EdgeInsets.zero
-            : const EdgeInsets.only(right: 10),
-        child: Obx(
-          () {
-            final videoDetail = introController.videoDetail.value;
-            final String title;
-            if (isFileSource || videoDetail.videos == 1) {
-              title = videoDetail.title!;
-            } else {
-              title =
-                  videoDetail.pages
-                      ?.firstWhereOrNull(
-                        (e) => e.cid == videoDetailCtr.cid.value,
-                      )
-                      ?.part ??
-                  videoDetail.title!;
-            }
-            return MarqueeText(
-              title,
-              spacing: 30,
-              velocity: 30,
-              strutStyle: const StrutStyle(fontSize: 16, leading: 0),
-              style: const TextStyle(color: Colors.white, fontSize: 16),
-              provider: effectiveProvider,
-            );
-          },
-        ),
-      );
-      if (introController.isShowOnlineTotal) {
-        title = Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            title,
-            Obx(
-              () => Text(
-                '${introController.total.value}人正在看',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                ),
+      title = Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Padding(
+            key: titleKey,
+            padding: isPortrait
+                ? EdgeInsets.zero
+                : const EdgeInsets.only(right: 10),
+            child: Obx(
+              () {
+                final videoDetail = introController.videoDetail.value;
+                final String title;
+                if (isFileSource || videoDetail.videos == 1) {
+                  title = videoDetail.title!;
+                } else {
+                  title =
+                      videoDetail.pages
+                          ?.firstWhereOrNull(
+                            (e) => e.cid == videoDetailCtr.cid.value,
+                          )
+                          ?.part ??
+                      videoDetail.title!;
+                }
+                return MarqueeText(
+                  title,
+                  spacing: 30,
+                  velocity: 30,
+                  strutStyle: const StrutStyle(fontSize: 16, leading: 0),
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  provider: effectiveProvider,
+                );
+              },
+            ),
+          ),
+          if (introController.isShowOnlineTotal || introController.isShowDmCount)
+            Positioned(
+              left: 0,
+              bottom: 0,
+              child: FractionalTranslation(
+                translation: const Offset(0, 1),
+                child: Obx(() {
+                  final parts = <String>[
+                    if (introController.isShowOnlineTotal)
+                      '${introController.total.value}人正在看',
+                    if (introController.isShowDmCount &&
+                        videoDetailCtr.dmCount.value != null)
+                      '${videoDetailCtr.dmCount.value}条弹幕',
+                  ];
+                  return Text(
+                    parts.join('  '),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                    ),
+                  );
+                }),
               ),
             ),
-          ],
-        );
-      }
+        ],
+      );
     }
 
     return Padding(
@@ -2240,22 +2271,22 @@ class HeaderControlState extends State<HeaderControl>
                 ),
               ],
             ),
-        // 计入人数行的高度，收起顶部控制栏时避免溢出内容残留。
-        if (introController.isShowOnlineTotal)
-          const Visibility(
-            visible: false,
-            maintainAnimation: true,
-            maintainState: true,
-            maintainSize: true,
-            child: Text(
-              '0人正在看',
-              maxLines: 1,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 11,
+          // 计入人数行的高度，收起顶部控制栏时避免溢出内容残留。
+          if (introController.isShowOnlineTotal || introController.isShowDmCount)
+            const Visibility(
+              visible: false,
+              maintainAnimation: true,
+              maintainState: true,
+              maintainSize: true,
+              child: Text(
+                '0人正在看  0条弹幕',
+                maxLines: 1,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                ),
               ),
             ),
-          ),
         ],
       ),
     );

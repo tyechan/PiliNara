@@ -70,7 +70,7 @@ android {
                 resValue(
                     type = "string",
                     name = "app_name",
-                    value = "PiliPlus dev",
+                    value = "PiliNara dev",
                 )
             }
             // Testers who installed the 1013 debug APK (`*.debug`) can upgrade

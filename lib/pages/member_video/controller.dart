@@ -1,5 +1,3 @@
-import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart'
-    show RefreshIndicatorState;
 import 'package:PiliPlus/common/widgets/scroll_physics.dart' show ReloadMixin;
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/member.dart';

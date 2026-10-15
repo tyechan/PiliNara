@@ -867,6 +867,9 @@ abstract final class Pref {
   static bool get removeOnlyFansVideoDyn =>
       _setting.get(SettingBoxKey.removeOnlyFansVideoDyn, defaultValue: false);
 
+  static bool get removeDynVideoDyn =>
+      _setting.get(SettingBoxKey.removeDynVideoDyn, defaultValue: false);
+
   static bool get antiGoodsReply =>
       _setting.get(SettingBoxKey.antiGoodsReply, defaultValue: false);
 
@@ -1254,6 +1257,9 @@ abstract final class Pref {
   static bool get enableShowLiveDanmaku =>
       _setting.get(SettingBoxKey.enableShowLiveDanmaku, defaultValue: true);
 
+  static bool get enableDanmakuMask =>
+      _setting.get(SettingBoxKey.enableDanmakuMask, defaultValue: false);
+
   static bool get enableQuickFav =>
       _setting.get(SettingBoxKey.enableQuickFav, defaultValue: false);
 
@@ -1409,6 +1415,9 @@ abstract final class Pref {
   static bool get enableOnlineTotal =>
       _setting.get(SettingBoxKey.enableOnlineTotal, defaultValue: false);
 
+  static bool get enableDmCount =>
+      _setting.get(SettingBoxKey.enableDmCount, defaultValue: false);
+
   static bool get autoEnterFullScreen =>
       _setting.get(SettingBoxKey.enableAutoEnter, defaultValue: false);
 
@@ -1486,6 +1495,9 @@ abstract final class Pref {
 
   static bool get showFsLockBtnRight =>
       _setting.get(SettingBoxKey.showFsLockBtnRight, defaultValue: false);
+
+  static bool get lockFsRotation =>
+      _setting.get(SettingBoxKey.lockFsRotation, defaultValue: false);
 
   static bool get silentDownImg =>
       _setting.get(SettingBoxKey.silentDownImg, defaultValue: false);
@@ -1681,6 +1693,22 @@ abstract final class Pref {
   static set aiPromptTemplates(String value) =>
       _setting.put(SettingBoxKey.aiPromptTemplates, value);
 
+  static bool get aiAutoScroll =>
+      _setting.get(SettingBoxKey.aiAutoScroll, defaultValue: true);
+
+  static set aiAutoScroll(bool value) =>
+      _setting.put(SettingBoxKey.aiAutoScroll, value);
+
+  /// 思考强度（reasoning_effort）：未干预服务商默认行为时为 'default'。
+  static String get aiReasoningEffort {
+    final value =
+        _setting.get(SettingBoxKey.aiReasoningEffort, defaultValue: 'default');
+    return value == 'auto' ? 'default' : value;
+  }
+
+  static set aiReasoningEffort(String value) =>
+      _setting.put(SettingBoxKey.aiReasoningEffort, value);
+
   static int get angleDegrees =>
       _setting.get(SettingBoxKey.angleDegrees, defaultValue: 30);
 
@@ -1740,9 +1768,38 @@ abstract final class Pref {
   static bool get enableEmoteTooltip =>
       _setting.get(SettingBoxKey.enableEmoteTooltip, defaultValue: false);
 
-  static Set<MineTabType> get mineTabs =>
-      (_setting.get(SettingBoxKey.mineTabs) as List?)
-          ?.map<MineTabType>((index) => .values[index])
-          .toSet() ??
-      MineTabType.kDefault;
+  static Set<MineTabType> get mineTabs {
+    final cache = _setting.get(SettingBoxKey.mineTabs) as List?;
+    if (cache != null && cache.isNotEmpty) {
+      return cache
+          .whereType<int>()
+          .where((i) => i >= 0 && i < MineTabType.values.length)
+          .map((i) => MineTabType.values[i])
+          .toSet();
+    }
+    // 旧版「我的页卡片编辑」键 mineCardSort 存的是 MineCardType 索引：
+    // history=0, fav=1, toView=2 → history / favorite / later
+    final legacy = _setting.get(SettingBoxKey.mineCardSort) as List?;
+    if (legacy != null && legacy.isNotEmpty) {
+      const legacyMap = <int, MineTabType>{
+        0: MineTabType.history,
+        1: MineTabType.favorite,
+        2: MineTabType.later,
+      };
+      final tabs = legacy
+          .whereType<int>()
+          .map((i) => legacyMap[i])
+          .whereType<MineTabType>()
+          .toSet();
+      if (tabs.isNotEmpty) {
+        _setting.put(
+          SettingBoxKey.mineTabs,
+          tabs.map((e) => e.index).toList(),
+        );
+        _setting.delete(SettingBoxKey.mineCardSort);
+        return tabs;
+      }
+    }
+    return MineTabType.kDefault;
+  }
 }

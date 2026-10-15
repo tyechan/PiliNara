@@ -487,7 +487,7 @@ class VideoPopupMenu extends StatelessWidget {
                   TextButton(
                     onPressed: Get.back,
                     child: Text(
-                      '点错了',
+                      '取消',
                       style: TextStyle(
                         color: ColorScheme.of(context).outline,
                       ),

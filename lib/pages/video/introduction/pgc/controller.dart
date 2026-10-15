@@ -100,9 +100,9 @@ class PgcIntroController extends CommonIntroController {
         '[PgcIntroController] onClose() called, isEnteringPip: $isEnteringPip',
       );
     }
+    if (isEnteringPip) return;
     _seasonController?.dispose();
     _seasonController = null;
-    if (isEnteringPip) return;
     super.onClose();
   }
 
@@ -539,4 +539,5 @@ class PgcIntroController extends CommonIntroController {
     }
     return false;
   }
+
 }

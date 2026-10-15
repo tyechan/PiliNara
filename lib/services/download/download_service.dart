@@ -9,7 +9,6 @@ import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/sponsor_block.dart';
 import 'package:PiliPlus/http/video.dart';
 import 'package:PiliPlus/models/common/video/video_quality.dart';
-import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/download/bili_download_media_file_info.dart';
 import 'package:PiliPlus/models_new/download/playback_meta.dart';
@@ -20,7 +19,6 @@ import 'package:PiliPlus/models_new/video/video_detail/data.dart';
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart' as ugc;
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
 import 'package:PiliPlus/models_new/video/video_play_info/subtitle.dart';
-import 'package:PiliPlus/pages/danmaku/controller.dart';
 import 'package:PiliPlus/services/download/download_manager.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
 import 'package:PiliPlus/utils/danmaku_utils.dart';
@@ -28,10 +26,9 @@ import 'package:PiliPlus/utils/extension/file_ext.dart';
 import 'package:PiliPlus/utils/extension/string_ext.dart';
 import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
-import 'package:flutter/foundation.dart' show ValueChanged;
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:flutter/foundation.dart'
-    show kDebugMode, debugPrint, VoidCallback;
+    show kDebugMode, debugPrint, VoidCallback, ValueChanged;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:path/path.dart' as path;
@@ -130,9 +127,10 @@ class DownloadService extends GetxService {
     VideoDetailData? videoDetail,
     ugc.EpisodeItem? videoArc,
     required VideoQuality videoQuality,
-    SeasonInfo? seasonInfo,
     String? autoFolderTitle,
     String? autoFolderSourceKey,
+    int? autoFolderIndex,
+    SeasonInfo? seasonInfo,
   }) {
     final cid = page.cid!;
     if (downloadList.indexWhere((e) => e.cid == cid) != -1) {
@@ -186,6 +184,7 @@ class DownloadService extends GetxService {
       pageData: pageData,
       autoFolderTitle: autoFolderTitle,
       autoFolderSourceKey: autoFolderSourceKey,
+      autoFolderIndex: autoFolderIndex,
       seasonInfo: seasonInfo,
     );
     _createDownload(entry);
@@ -583,6 +582,10 @@ class DownloadService extends GetxService {
     }
   }
 
+  /// 更新离线缓存里的空降/跳过片段（供「更新片段」菜单使用）
+  ///
+  /// 上游把片段存在 entry.segments（entry.json），本 fork 另有一套
+  /// playback_meta.json，两者各自保留：这里只负责刷新 entry.segments。
   Future<bool> updateSegments(BiliDownloadEntryInfo entry) {
     if (entry.pageData != null) {
       return _updateBlockSegments(entry);
@@ -633,7 +636,6 @@ class DownloadService extends GetxService {
     return false;
   }
 
-
   Future<void> _startDownload(BiliDownloadEntryInfo entry) async {
     try {
       if (!await downloadDanmaku(entry: entry)) {
@@ -647,6 +649,9 @@ class DownloadService extends GetxService {
 
       _updateCurStatus(DownloadStatus.getPlayUrl);
 
+      // 上游的 DownloadHttp.getVideoUrl 会把 pgc 的 clipInfoList 写进 entry.segments，
+      // 本 fork 改为经 DownloadVideoUrlResult 同时取回（供 playback_meta 使用），
+      // 因此首次拿到片段时需要自己落盘一次 entry.json
       final noSegmentBefore = entry.segments == null;
 
       final downloadResult = await DownloadHttp.getVideoUrl(

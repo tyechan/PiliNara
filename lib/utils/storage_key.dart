@@ -28,6 +28,7 @@ abstract final class SettingBoxKey {
       enableAutoEnter = 'enableAutoEnter',
       enableAutoExit = 'enableAutoExit',
       enableOnlineTotal = 'enableOnlineTotal',
+      enableDmCount = 'enableDmCount',
       superChatType = 'superChatType',
       superChatTimeType = 'superChatTimeType',
       fullScreenSCWidth = 'fullScreenSCWidth',
@@ -143,6 +144,7 @@ abstract final class SettingBoxKey {
       antiGoodsDyn = 'antiGoodsDyn',
       removeBlockedDyn = 'removeBlockedDyn',
       removeOnlyFansVideoDyn = 'removeOnlyFansVideoDyn',
+      removeDynVideoDyn = 'removeDynVideoDyn',
       antiGoodsReply = 'antiGoodsReply',
       replyMinLevel = 'replyMinLevel',
       keepUpOwnerReply = 'keepUpOwnerReply',
@@ -180,6 +182,7 @@ abstract final class SettingBoxKey {
       showFsScreenshotBtn = 'showFsScreenshotBtn',
       showFsLockBtn = 'showFsLockBtn',
       showFsLockBtnRight = 'showFsLockBtnRight',
+      lockFsRotation = 'lockFsRotation',
       silentDownImg = 'silentDownImg',
       showMemberShop = 'showMemberShop',
       enablePlayAll = 'enablePlayAll',
@@ -211,7 +214,9 @@ abstract final class SettingBoxKey {
       aiModel = 'aiModel',
       aiModelListCache = 'aiModelListCache',
       aiModelListCacheTime = 'aiModelListCacheTime',
-      aiPromptTemplates = 'aiPromptTemplates';
+      aiPromptTemplates = 'aiPromptTemplates',
+      aiAutoScroll = 'aiAutoScroll',
+      aiReasoningEffort = 'aiReasoningEffort';
 
   static const String minimizeOnExit = 'minimizeOnExit',
       windowSize = 'windowSize',
@@ -255,6 +260,7 @@ abstract final class SettingBoxKey {
 
   static const String enableShowDanmaku = 'enableShowDanmaku',
       enableShowLiveDanmaku = 'enableShowLiveDanmaku',
+      enableDanmakuMask = 'enableDanmakuMask',
       pipNoDanmaku = 'pipNoDanmaku',
       showVipDanmaku = 'showVipDanmaku',
       mergeDanmaku = 'mergeDanmaku',
@@ -322,6 +328,7 @@ abstract final class SettingBoxKey {
       msgBadgeMode = 'msgBadgeMode',
       msgUnReadTypeV2 = 'msgUnReadTypeV2',
       navBarSort = 'navBarSort',
+      // 旧版「我的页卡片编辑」的键，仅用于首次迁移到 mineTabs（见 Pref.mineTabs）
       mineCardSort = 'mineCardSort',
       tempPlayerConf = 'tempPlayerConf',
       reduceLuxColor = 'reduceLuxColor',
@@ -346,7 +353,6 @@ abstract final class LocalCacheKey {
       lastLocalPlayed = 'lastLocalPlayed',
       mixinKey = 'mixinKey',
       timeStamp = 'timeStamp',
-      buvid = 'buvid',
       remarkMids = 'remarkMids',
       cdnNodeList = 'cdnNodeList',
       cdnNodeListTime = 'cdnNodeListTime',

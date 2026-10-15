@@ -8,7 +8,6 @@ import 'package:PiliPlus/models_new/live/live_superchat/item.dart';
 import 'package:PiliPlus/pages/member/widget/medal_widget.dart';
 import 'package:PiliPlus/utils/app_scheme.dart';
 import 'package:PiliPlus/utils/color_utils.dart';
-import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/extension/iterable_ext.dart';
 import 'package:PiliPlus/utils/extension/selectable_region_ext.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
@@ -112,7 +111,7 @@ class _SuperChatCardState extends State<SuperChatCard> {
       context: context,
       position: PageUtils.menuPosition(offset),
       clipBehavior: Clip.antiAlias,
-      items: <PopupMenuEntry<void>>[
+      items: [
         CustomPopupMenuItem<void>(
           height: 38,
           onTap: () => Get.toNamed('/member?mid=${item.uid}'),
@@ -133,14 +132,14 @@ class _SuperChatCardState extends State<SuperChatCard> {
           height: 38,
           onTap: () {
             if (!mounted) return;
-            _screenShot(context, item);
+            _screenShot(context, item, showTime: _showTime);
           },
           child: const Text(
             '保存为图片',
             style: TextStyle(fontSize: 13),
           ),
         ),
-        PopupMenuItem(
+        CustomPopupMenuItem<void>(
           height: 38,
           onTap: widget.onReport,
           child: const Text(
@@ -162,14 +161,6 @@ class _SuperChatCardState extends State<SuperChatCard> {
     SuperChatTimeType.always => true,
   };
 
-  String _formatTime(int ts) {
-    final dt = DateTime.fromMillisecondsSinceEpoch(ts * 1000);
-    final h = dt.hour.toString().padLeft(2, '0');
-    final m = dt.minute.toString().padLeft(2, '0');
-    final s = dt.second.toString().padLeft(2, '0');
-    return '$h:$m:$s';
-  }
-
   @override
   Widget build(BuildContext context) {
     return _build(
@@ -181,6 +172,14 @@ class _SuperChatCardState extends State<SuperChatCard> {
   }
 }
 
+String _formatTime(int ts) {
+  final dt = DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+  final h = dt.hour.toString().padLeft(2, '0');
+  final m = dt.minute.toString().padLeft(2, '0');
+  final s = dt.second.toString().padLeft(2, '0');
+  return '$h:$m:$s';
+}
+
 Widget _build({
   required SuperChatItem item,
   Function(Offset, SuperChatItem)? showMenu,
@@ -189,6 +188,7 @@ Widget _build({
 }) {
   final bottomColor = ColourUtils.parseColor(item.backgroundBottomColor);
   final border = BorderSide(color: bottomColor);
+  final sendTime = showTime ? _formatTime(item.startSime) : null;
 
   Widget name = Text(
     item.userInfo.uname,
@@ -228,37 +228,6 @@ Widget _build({
     );
   }
 
-  Widget? timeWidget;
-  if (showTime) {
-    timeWidget = Text(
-      DateFormatUtils.format(
-        item.startSime,
-        format: DateFormatUtils.longFormatDs,
-      ),
-      style: TextStyle(color: bottomColor, fontSize: 13.5),
-    );
-  }
-
-  if (remains == null && timeWidget != null) {
-    price = Row(
-      crossAxisAlignment: .end,
-      mainAxisAlignment: .spaceBetween,
-      children: [
-        price,
-        timeWidget,
-      ],
-    );
-  } else if (remains_ != null && timeWidget != null) {
-    remains_ = Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        remains_,
-        timeWidget,
-      ],
-    );
-  }
-
   Widget top = Container(
     decoration: BoxDecoration(
       borderRadius: const .vertical(top: .circular(8)),
@@ -285,7 +254,25 @@ Widget _build({
             children: [name, price],
           ),
         ),
-        ?remains_,
+        if (sendTime != null)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ?remains_,
+              Text(
+                sendTime,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: ColourUtils.parseColor(
+                    item.backgroundPriceColor,
+                  ).withValues(alpha: 0.6),
+                ),
+              ),
+            ],
+          )
+        else
+          ?remains_,
       ],
     ),
   );
@@ -378,12 +365,16 @@ Widget _avatar(String face, String? faceFrame) {
   return avatar;
 }
 
-Future<void> _screenShot(BuildContext context, SuperChatItem item) async {
+Future<void> _screenShot(
+  BuildContext context,
+  SuperChatItem item, {
+  required bool showTime,
+}) async {
   final image = await Screenshot.screenshot(
     context,
     Material(
       type: .transparency,
-      child: _build(item: item),
+      child: _build(item: item, showTime: showTime),
     ),
     constraints: const BoxConstraints(maxWidth: 400),
     pixelRatio: 3,

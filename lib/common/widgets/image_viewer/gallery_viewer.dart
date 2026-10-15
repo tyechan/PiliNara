@@ -647,7 +647,7 @@ class _GalleryViewerState extends State<GalleryViewer>
           child: const Text('网页打开', style: TextStyle(fontSize: 14)),
         ),
         if (widget.sources.length > 1)
-          PopupMenuItem(
+          CustomPopupMenuItem<void>(
             height: 42,
             onTap: () => ImageUtils.downloadImg(
               widget.sources.map((item) => item.url).toList(),

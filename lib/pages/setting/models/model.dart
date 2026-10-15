@@ -296,12 +296,14 @@ SettingsModel getListBanWordModel({
     leading: const Icon(Icons.filter_alt_outlined),
     title: title,
     getSubtitle: () {
+      if (banWord.isEmpty) return "点击添加";
       final items = parseItems(banWord);
-      final subtitle = items.isEmpty ? "点击添加" : '${items.length} 个关键词';
-      if (banScope != null) {
-        return '作用域: $banScope\n$subtitle';
-      }
-      return subtitle;
+      final subtitle = items.isEmpty
+          ? "点击添加"
+          : '${items.length} 个关键词';
+      // banScope 来自上游，用于在副标题里标注过滤作用域
+      if (banScope == null) return subtitle;
+      return '作用域: $banScope\n$subtitle';
     },
     onTap: (context, setState) async {
       final items = parseItems(banWord);

@@ -1,4 +1,6 @@
 import 'package:PiliPlus/common/widgets/custom_icon.dart';
+import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart'
+    show RefreshIndicatorState;
 import 'package:PiliPlus/http/fav.dart';
 import 'package:PiliPlus/http/loading_state.dart';
 import 'package:PiliPlus/http/user.dart';
@@ -16,6 +18,8 @@ import 'package:PiliPlus/models_new/later/data.dart';
 import 'package:PiliPlus/models_new/later/list.dart';
 import 'package:PiliPlus/models_new/sub/sub/data.dart';
 import 'package:PiliPlus/models_new/sub/sub/list.dart';
+import 'package:PiliPlus/pages/common/common_controller.dart'
+    show ScrollOrRefreshMixin;
 import 'package:PiliPlus/pages/common/common_list_controller.dart';
 import 'package:PiliPlus/services/account_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
@@ -28,14 +32,27 @@ import 'package:PiliPlus/utils/theme_utils.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
-import 'package:material_ui/material_ui.dart';
+import 'package:material_ui/material_ui.dart' hide RefreshIndicatorState;
 
-class MineController extends GetxController with AccountMixin {
+class MineController extends GetxController
+    with AccountMixin, ScrollOrRefreshMixin {
   @override
   AccountService accountService = Get.find<AccountService>();
 
-  final refreshKey = GlobalKey();
+  @override
+  final ScrollController scrollController = ScrollController();
 
+  final GlobalKey<RefreshIndicatorState> refreshKey =
+      GlobalKey<RefreshIndicatorState>();
+
+  @override
+  Future<void> showRefresh() => refreshKey.currentState?.show() ?? onRefresh();
+
+  @override
+  void onClose() {
+    scrollController.dispose();
+    super.onClose();
+  }
   // 用户信息 头像、昵称、lv
   final Rx<UserInfoData> userInfo = UserInfoData().obs;
   // 用户状态 动态、关注、粉丝
@@ -98,7 +115,7 @@ class MineController extends GetxController with AccountMixin {
   }
 
   void _initTabs() {
-    mineTabs = _resolveMineTabs();
+    mineTabs = Pref.mineTabs;
     for (final tab in mineTabs) {
       switch (tab) {
         case .favorite:
@@ -111,31 +128,6 @@ class MineController extends GetxController with AccountMixin {
           subCtr = SubCtr();
       }
     }
-  }
-
-  /// Prefer upstream mineTabs; fall back to PiliNara mineCardSort.
-  static Set<MineTabType> _resolveMineTabs() {
-    final stored = GStorage.setting.get(SettingBoxKey.mineTabs);
-    if (stored is List && stored.isNotEmpty) {
-      return Pref.mineTabs;
-    }
-    final cards = GStorage.setting.get(SettingBoxKey.mineCardSort);
-    if (cards is List && cards.isNotEmpty) {
-      final migrated = cards
-          .whereType<int>()
-          .map(
-            (i) => switch (i) {
-              0 => MineTabType.history,
-              1 => MineTabType.favorite,
-              2 => MineTabType.later,
-              _ => null,
-            },
-          )
-          .whereType<MineTabType>()
-          .toSet();
-      if (migrated.isNotEmpty) return migrated;
-    }
-    return Pref.mineTabs;
   }
 
   @override
@@ -325,6 +317,7 @@ class MineController extends GetxController with AccountMixin {
     }
   }
 
+  @override
   Future<void> onRefresh({bool isManual = true}) {
     if (!accountService.isLogin.value) {
       return Future.syncValue(null);
@@ -335,18 +328,6 @@ class MineController extends GetxController with AccountMixin {
     return Future.wait(
       tabCtr().map((ctr) => ctr.onRefresh(isManual: isManual)),
     );
-  }
-
-  void toTopOrRefresh() {
-    for (final ctr in tabCtr()) {
-      ctr.toTopOrRefresh();
-    }
-  }
-
-  void toTopAndRefresh() {
-    for (final ctr in tabCtr()) {
-      ctr.toTopAndRefresh();
-    }
   }
 
   @override

@@ -28,18 +28,8 @@ abstract final class RecommendFilter {
     return mid != null && GlobalData().whitelistMids.containsKey(mid);
   }
 
-  static bool filter(BaseVideoItemModel videoItem) =>
-      filterWithExempt(videoItem);
-
   // (web/app)rcmd
   static bool filterWithExempt(BaseVideoItemModel videoItem) {
-    final mid = videoItem.owner.mid;
-    if (filterUser(mid)) {
-      return true;
-    }
-    if (isWhitelisted(mid)) {
-      return false;
-    }
     //由于相关视频中没有已关注标签，只能视为非关注视频
     if (videoItem.isFollowed && exemptFilterForFollowed) {
       return false;
