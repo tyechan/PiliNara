@@ -18,7 +18,6 @@ class VodHttpProxy {
   int? port;
   final Map<String, VodSession> _sessions = {};
   int _seq = 0;
-  String? _generation;
   bool _forceDirectOnce = false;
   DateTime? lastRequestAt;
   int requestsServed = 0;
@@ -27,16 +26,24 @@ class VodHttpProxy {
 
   bool get hasActiveSession => _sessions.isNotEmpty;
 
+  Iterable<VodSession> get debugSessions => _sessions.values;
+
   void forceDirectOnce() {
     _forceDirectOnce = true;
   }
 
-  Future<void> resetForTest() async {
+  void closeAll({String reason = 'close'}) {
+    if (_sessions.isEmpty) return;
+    VodProxyLog.log('close reason=$reason n=${_sessions.length}');
     for (final session in _sessions.values) {
-      session.close();
+      session.close(reason: reason);
     }
     _sessions.clear();
-    _generation = null;
+  }
+
+  Future<void> resetForTest() async {
+    VodProxyLog.resetForTest();
+    closeAll(reason: 'reset-test');
     _seq = 0;
     _forceDirectOnce = false;
     requestsServed = 0;
@@ -49,6 +56,21 @@ class VodHttpProxy {
 
   String? get preferredHost =>
       _sessions.isEmpty ? null : _sessions.values.first.pool.preferred?.host;
+
+  String hostsFor(String kind) {
+    for (final session in _sessions.values) {
+      if (session.kind != kind) continue;
+      final hosts = session.pool.topHosts(k: 3).map((h) => h.host).join(',');
+      return hosts.isEmpty ? '-' : hosts;
+    }
+    return '-';
+  }
+
+  void markFallback(String reason) {
+    for (final session in _sessions.values) {
+      session.fallbackReason = reason;
+    }
+  }
 
   Future<bool> ensureStarted() async {
     if (isRunning) return true;
@@ -92,7 +114,7 @@ class VodHttpProxy {
       return null;
     }
     if (!await ensureStarted()) return null;
-    _dropStale(source.videoSource);
+    closeAll(reason: 'new-wrap');
     final videoId = _register(
       kind: 'video',
       primary: source.videoSource,
@@ -102,7 +124,8 @@ class VodHttpProxy {
       await _sessions[videoId]!.ensureSize();
     } catch (e) {
       VodProxyLog.log('probe-failed video $e — using direct URL');
-      _sessions[videoId]?.close();
+      _sessions[videoId]?.fallbackReason = e.toString();
+      _sessions[videoId]?.close(reason: 'probe-failed');
       _sessions.remove(videoId);
       return null;
     }
@@ -118,16 +141,25 @@ class VodHttpProxy {
         audio = _url(audioId);
       } catch (e) {
         VodProxyLog.log('probe-failed audio $e — using direct audio');
-        _sessions[audioId]?.close();
+        _sessions[audioId]?.fallbackReason = e.toString();
+        _sessions[audioId]?.close(reason: 'probe-failed');
         _sessions.remove(audioId);
         audio = a;
       }
     }
     final video = _url(videoId);
+    final vHosts = _sessions[videoId]?.pool.topHosts(k: 3).map((h) => h.host).join(',') ?? '-';
+    final aId = audio != null && audio.startsWith('http://127.0.0.1')
+        ? audio.split('/').last
+        : null;
+    final aHosts = aId == null
+        ? '-'
+        : (_sessions[aId]?.pool.topHosts(k: 3).map((h) => h.host).join(',') ?? '-');
     VodProxyLog.log(
       'wrap video=$video audio=${audio ?? '-'} '
       'srcHost=${Uri.tryParse(source.videoSource)?.host ?? '-'} '
-      'size=${_sessions[videoId]?.fileSize ?? -1}',
+      'size=${_sessions[videoId]?.fileSize ?? -1} '
+      'videoHosts=$vHosts audioHosts=$aHosts',
     );
     return NetworkSource(
       videoSource: video,
@@ -158,21 +190,11 @@ class VodHttpProxy {
       await _sessions[id]!.ensureSize();
     } catch (e) {
       VodProxyLog.log('openRaw-probe-failed $e');
-      _sessions[id]?.close();
+      _sessions[id]?.close(reason: 'probe-failed');
       _sessions.remove(id);
       return null;
     }
     return _url(id);
-  }
-
-  void _dropStale(String videoPrimary) {
-    final gen = videoPrimary;
-    if (_generation == gen) return;
-    for (final session in _sessions.values) {
-      session.close();
-    }
-    _sessions.clear();
-    _generation = gen;
   }
 
   String _register({

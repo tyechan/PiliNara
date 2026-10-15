@@ -33,6 +33,7 @@ import 'package:PiliPlus/plugin/pl_player/models/speed_lock_hint.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
+import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/services/live_pip_overlay_service.dart';
@@ -576,6 +577,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool _openedViaProxy = false;
   bool _proxyFallbackScheduled = false;
   Timer? _proxyOpenWatchdog;
+  final PlaybackDiag _diag = PlaybackDiag();
 
   late final progressType = Pref.btmProgressBehavior;
   late final enableQuickDouble = Pref.enableQuickDouble;
@@ -1058,6 +1060,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       this.height = height;
       this.dataSource = dataSource;
       _autoPlay = autoplay;
+      if (Platform.isAndroid && !isLive) {
+        VodHttpProxy.instance.closeAll(reason: 'media-change');
+      }
       // 初始化数据加载状态
       dataStatus.value = DataStatus.loading;
       // 初始化全屏方向
@@ -1326,6 +1331,61 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       play: false,
     );
     applyVideoPictureParameters(player);
+    if (Platform.isAndroid && !isLive) {
+      _logPlaybackStart(playSource);
+      _diag.attach(player, proxy: _openedViaProxy);
+    }
+  }
+
+  void _logPlaybackStart(DataSource playSource) {
+    final qaH = height;
+    final qaName = qaH == null
+        ? '-'
+        : qaH >= 2160
+        ? '2160P'
+        : qaH >= 1440
+        ? '1440P'
+        : qaH >= 1080
+        ? '1080P'
+        : qaH >= 720
+        ? '720P'
+        : '${qaH}P';
+    final vHost = playSource is NetworkSource
+        ? (Uri.tryParse(playSource.videoSource)?.host ?? '-')
+        : 'file';
+    final aHost = playSource is NetworkSource
+        ? (playSource.audioSource == null
+              ? '-'
+              : (Uri.tryParse(playSource.audioSource!)?.host ?? '-'))
+        : '-';
+    final videoHosts = _openedViaProxy
+        ? VodHttpProxy.instance.hostsFor('video')
+        : vHost;
+    final audioHosts = _openedViaProxy
+        ? VodHttpProxy.instance.hostsFor('audio')
+        : aHost;
+    VodProxyLog.log(
+      'play bvid=${_bvid ?? '-'} cid=${cid ?? '-'} aid=${_aid ?? '-'} '
+      'title=${_mediaTitle(playSource)} quality=$qaName height=${qaH ?? '-'} '
+      'codec=- fps=- duration=${_videoPlayerController?.state.duration.inSeconds ?? 0}s '
+      'mode=${_openedViaProxy ? 'proxy' : 'direct'} '
+      'videoHosts=$videoHosts audioHosts=$audioHosts',
+    );
+  }
+
+  String _mediaTitle(DataSource playSource) {
+    try {
+      final player = _videoPlayerController;
+      if (player is NativePlayer) {
+        final t = player.getProperty('media-title');
+        if (t.isNotEmpty && t != '-') return t.replaceAll('\n', ' ');
+      }
+    } catch (_) {}
+    if (playSource is NetworkSource) {
+      final segs = Uri.tryParse(playSource.videoSource)?.pathSegments;
+      if (segs != null && segs.isNotEmpty) return segs.last;
+    }
+    return '-';
   }
 
   Future<void>? refreshPlayer() {
@@ -1473,12 +1533,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       }),
       stream.buffering.listen((bool buffering) {
         isBuffering.value = buffering;
+        if (Platform.isAndroid && !isLive) {
+          _diag.onBuffering(buffering);
+        }
         if (!playerStatus.isCompleted) {
           _stopWakeLockTimer();
           _updatePlaybackState();
         }
       }),
-      if (kDebugMode || Pref.enableLog)
+      if (kDebugMode || Pref.enableLog || Platform.isAndroid)
         stream.log.listen((PlayerLog log) {
           final level = log.level.toLowerCase();
           if (level == 'error' || level == 'fatal') {
@@ -1489,6 +1552,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           }
           if (Platform.isAndroid) {
             _noteMpvLogForProxy(log);
+            if (!isLive) _diag.onLog(log);
           }
           if (kDebugMode) {
             debugPrint(log.toString());
@@ -1506,6 +1570,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             Timer(const Duration(milliseconds: 3000), refreshPlayer);
           }
           return;
+        }
+        if (Platform.isAndroid && !isLive) {
+          _diag.onError(event);
         }
         if (_openedViaProxy &&
             (event.contains('127.0.0.1') ||
@@ -1593,6 +1660,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     if (_proxyFallbackScheduled || !_openedViaProxy || isLive) return;
     _proxyFallbackScheduled = true;
     _proxyOpenWatchdog?.cancel();
+    VodHttpProxy.instance.markFallback(reason);
     VodProxyLog.log('fallback-direct reason=$reason');
     unawaited(_fallbackProxyToDirect());
   }
@@ -1623,6 +1691,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       await _videoPlayerController?.stream.buffer.first;
     }
     danmakuController?.clear();
+    if (Platform.isAndroid && !isLive) {
+      _diag.onSeek(position);
+    }
     try {
       await _videoPlayerController?.seek(position);
       _updateIOSPip(position);
@@ -2756,6 +2827,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     _removeListeners();
+    _diag.detach();
+    if (Platform.isAndroid) {
+      VodHttpProxy.instance.closeAll(reason: 'dispose');
+    }
     _positionListeners.clear();
     _statusListeners.clear();
     _stopWakeLockTimer();

@@ -4,6 +4,7 @@ on:
     push:
         tags:
             - "v*-btr-proxy*"
+            - "v2.1.6-*"
     pull_request:
         types:
             - opened
@@ -104,7 +105,7 @@ jobs:
               run: |
                   for file in build/app/outputs/flutter-apk/app-*-release.apk; do
                     abi=$(echo "$file" | sed -E 's|.*app-(.*)-release\.apk|\1|')
-                    mv "$file" "PiliPala-${{ env.version_name }}-${{ env.commit_hash }}-${{ env.version_code }}_${abi}.apk"
+                    mv "$file" "PiliPala-${{ env.version_name }}-${{ env.commit_hash }}_${abi}.apk"
                   done
               shell: bash
 

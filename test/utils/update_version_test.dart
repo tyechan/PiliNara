@@ -1,4 +1,6 @@
+import 'package:PiliPlus/build_config.dart';
 import 'package:PiliPlus/http/api.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/utils/update.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -8,7 +10,14 @@ void main() {
     expect(Api.latestApp, isNot(contains('Starfallan/PiliNara')));
   });
 
-  test('parses 10-digit versionCode from release name and assets', () {
+  test('parses 10-digit versionCode from short fork names', () {
+    expect(
+      Update.parseRemoteVersionCode(
+        tagName: 'v2.1.6-1016a+abc1234',
+        name: 'PiliPala 2.1.6-1016a+abc1234 (2026101601)',
+      ),
+      2026101601,
+    );
     expect(
       Update.parseRemoteVersionCode(
         tagName: 'v2.1.6-20261015-btr-proxy+abc1234',
@@ -42,6 +51,15 @@ void main() {
       Update.parseRemoteVersionCode(name: 'notes 20261015 only'),
       isNull,
     );
+  });
+
+  test('About displayVersion is a short one-liner', () {
+    expect(BuildConfig.displayVersion.length, lessThanOrEqualTo(24));
+    expect(BuildConfig.displayVersion, contains('·'));
+    expect(BuildConfig.versionName.length, lessThanOrEqualTo(16));
+    expect(BuildConfig.versionName, '2.1.6-1016a');
+    expect(VodProxyLog.bootLine, contains('2.1.6-1016a'));
+    expect(VodProxyLog.bootLine, contains('2026101601'));
   });
 
   test('isRemoteNewer compares versionCode only', () {

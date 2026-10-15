@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
@@ -96,19 +98,87 @@ void main() {
     expect(hosts.first, 'upos-sz-mirrorcosov.bilivideo.com');
     expect(hosts, contains('upos-sz-mirrorali.bilivideo.com'));
     expect(hosts, contains('upos-sz-mirrorhw.bilivideo.com'));
+    expect(hosts, contains('upos-hz-mirrorakam.akamaized.net'));
     expect(hosts.toSet().length, hosts.length);
   });
 
-  test('host pool blacklists a failing host and preferNext moves on', () {
+  test('host pool blacklists only after repeated failures', () {
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
     const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
-    final pool = VodHostPool([ali, hw]);
+    final pool = VodHostPool([ali, hw], random: Random(1));
     pool.recordSuccess(ali, bytes: 256 * 1024, elapsedMs: 400);
     pool.recordSuccess(hw, bytes: 512 * 1024, elapsedMs: 200);
     expect(pool.preferred?.host, 'upos-sz-mirrorhw.bilivideo.com');
-    pool.recordFailure(ali, reason: 'reset');
-    expect(pool.pickUrl(), hw);
+    pool.recordFailure(ali, reason: 'TimeoutException');
+    expect(pool.available.map((h) => h.host), contains('upos-sz-mirrorali.bilivideo.com'));
+    pool.recordFailure(ali, reason: 'TimeoutException');
+    pool.recordFailure(ali, reason: 'TimeoutException');
+    expect(
+      pool.available.map((h) => h.host),
+      isNot(contains('upos-sz-mirrorali.bilivideo.com')),
+    );
     pool.preferNext();
     expect(pool.preferred?.host, isNot('upos-sz-mirrorhw.bilivideo.com'));
+  });
+
+  test('pickUrl spreads workers across the fastest hosts', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    const cos = 'https://upos-sz-mirrorcos.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw, cos], random: Random(2));
+    pool.recordSuccess(ali, bytes: 256 * 1024, elapsedMs: 200);
+    pool.recordSuccess(hw, bytes: 256 * 1024, elapsedMs: 180);
+    pool.recordSuccess(cos, bytes: 256 * 1024, elapsedMs: 800);
+    final counts = <String, int>{};
+    for (var i = 0; i < 80; i++) {
+      final host = Uri.parse(pool.pickUrl()!).host;
+      counts[host] = (counts[host] ?? 0) + 1;
+    }
+    expect(counts.length, greaterThanOrEqualTo(2));
+    expect(counts['upos-sz-mirrorali.bilivideo.com'] ?? 0, greaterThan(0));
+    expect(counts['upos-sz-mirrorhw.bilivideo.com'] ?? 0, greaterThan(0));
+  });
+
+  test('overseas hosts are scored lower unless they win the probe', () {
+    expect(VodHostPool.isOverseasHost('upos-hz-mirrorakam.akamaized.net'), isTrue);
+    expect(VodHostPool.isOverseasHost('upos-sz-mirrorcosov.bilivideo.com'), isFalse);
+    expect(VodHostPool.isOverseasHost('upos-sz-mirrorali.bilivideo.com'), isFalse);
+    const akam = 'https://upos-hz-mirrorakam.akamaized.net/a.m4s';
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    final pool = VodHostPool([akam, ali], random: Random(1));
+    pool.recordSuccess(akam, bytes: 128 * 1024, elapsedMs: 300);
+    pool.recordSuccess(ali, bytes: 128 * 1024, elapsedMs: 400);
+    pool.overseasWins = false;
+    expect(pool.preferred?.host, 'upos-sz-mirrorali.bilivideo.com');
+    pool.overseasWins = true;
+    expect(pool.preferred?.host, 'upos-hz-mirrorakam.akamaized.net');
+  });
+
+  test('compact stats omit idle hosts', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw]);
+    pool.recordSuccess(ali, bytes: 1024, elapsedMs: 100);
+    expect(pool.describe(), contains('mirrorali'));
+    expect(pool.describe(), isNot(contains('mirrorhw')));
+  });
+
+  test('unban after cooldown logs a retry', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw], random: Random(1));
+    for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+      pool.recordFailure(ali, reason: 'TimeoutException');
+    }
+    expect(
+      pool.available.map((h) => h.host),
+      isNot(contains('upos-sz-mirrorali.bilivideo.com')),
+    );
+    final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
+    banned.blacklistedUntil = DateTime.now().subtract(const Duration(seconds: 1));
+    expect(
+      pool.available.map((h) => h.host),
+      contains('upos-sz-mirrorali.bilivideo.com'),
+    );
   });
 }

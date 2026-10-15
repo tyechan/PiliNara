@@ -145,16 +145,20 @@ class _AboutPageState extends State<AboutPage> {
                 : () => Utils.copyText(currentVersion),
             title: const Text('当前版本'),
             leading: const Icon(Icons.commit_outlined),
-            trailing: Text(
-              currentVersion,
+            subtitle: Text(
+              BuildConfig.displayVersion,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: subTitleStyle,
             ),
           ),
           ListTile(
-            title: Text(
-              '''
-Build Time: ${DateFormatUtils.format(BuildConfig.buildTime, format: DateFormatUtils.longFormatDs)}
-Commit Hash: ${BuildConfig.commitHash}''',
+            title: const Text('构建信息'),
+            subtitle: Text(
+              'versionName ${BuildConfig.versionName}\n'
+              'versionCode ${BuildConfig.versionCode}\n'
+              'Build Time: ${DateFormatUtils.format(BuildConfig.buildTime, format: DateFormatUtils.longFormatDs)}\n'
+              'Commit Hash: ${BuildConfig.commitHash}',
               style: const TextStyle(fontSize: 14),
             ),
             leading: const Icon(Icons.info_outline),

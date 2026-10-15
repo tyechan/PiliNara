@@ -171,15 +171,17 @@ abstract final class VideoUtils {
   ];
 
   /// Replace the media host, keeping scheme/path/query (signed URLs).
-  /// Unknown hosts (including cosov) jump to the first fallback.
-  /// Mainland hosts used by the VOD multi-connection proxy. `cosov` is left
-  /// as an original/backup candidate only — it is not injected here.
+  /// Unknown hosts jump to the first fallback.
+  ///
+  /// Mainland (plus measurable akam) hosts rewritten into the VOD proxy pool.
   static const proxyMainlandHosts = [
     'upos-sz-mirrorali.bilivideo.com',
     'upos-sz-mirrorhw.bilivideo.com',
     'upos-sz-mirrorcos.bilivideo.com',
+    'upos-sz-mirrorcosov.bilivideo.com',
     'upos-sz-mirroralib.bilivideo.com',
     'upos-sz-mirrorhwb.bilivideo.com',
+    'upos-hz-mirrorakam.akamaized.net',
   ];
 
   /// Unique host-rewritten URLs: original + extras + user CDN + mainland list.

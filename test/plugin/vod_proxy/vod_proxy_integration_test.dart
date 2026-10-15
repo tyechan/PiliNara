@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _MockCdn {
@@ -252,6 +253,47 @@ void main() {
     expect(err, isNot(contains('Could not open source file')));
     expect(err, isNot(contains('Failed to open http://127.0.0.1')));
   }, timeout: const Timeout(Duration(seconds: 40)));
+
+  test('re-reading the same file does not inflate unique served bytes', () async {
+    final cdn = _MockCdn(payload);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      windowBytes: 64 * 1024,
+      workers: 3,
+    );
+    expect(proxyUrl, isNotNull);
+    await _fetchAll(proxyUrl!);
+    await _fetchAll(proxyUrl);
+    final session = VodHttpProxy.instance.debugSessions.first;
+    expect(session.uniqueServedBytes, lessThanOrEqualTo(payload.length));
+    expect(session.uniqueFetchedBytes, lessThanOrEqualTo(payload.length + 16 * 1024));
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('closeAll stops the session and writes session_end', () async {
+    final cdn = _MockCdn(payload);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    await _fetchAll(proxyUrl!);
+    VodHttpProxy.instance.closeAll(reason: 'media-change');
+    expect(VodHttpProxy.instance.hasActiveSession, isFalse);
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('session_end')),
+      isTrue,
+    );
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('close reason=media-change')),
+      isTrue,
+    );
+  }, timeout: const Timeout(Duration(seconds: 25)));
 
   test('direct CDN URL still plays (toggle-off path)', () async {
     final cdn = _MockCdn(payload);

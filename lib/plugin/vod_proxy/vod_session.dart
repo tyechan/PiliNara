@@ -5,8 +5,8 @@ import 'dart:typed_data';
 
 import 'package:PiliPlus/http/browser_ua.dart';
 import 'package:PiliPlus/http/constants.dart';
-import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 
 class VodSession {
@@ -34,21 +34,68 @@ class VodSession {
 
   final Map<int, Uint8List> _chunks = {};
   final Map<int, Future<Uint8List>> _inflight = {};
+  final Set<int> _fetchedChunks = {};
+  final Set<int> _servedChunks = {};
   int? fileSize;
   int _cursor = 0;
-  int _bytesServed = 0;
-  int _bytesFetched = 0;
+  int _bytesDelivered = 0;
+  int _bytesNet = 0;
+  int retries = 0;
+  int firstTtfbMs = 0;
   final DateTime startedAt = DateTime.now();
+  DateTime? lastServeAt;
   bool _closed = false;
+  bool _probed = false;
+  bool _endLogged = false;
+  String? fallbackReason;
   Timer? _statsTimer;
+  int _readEpoch = 0;
+  int _activeReads = 0;
+
+  bool get isClosed => _closed;
+
+  int get uniqueServedBytes {
+    var n = 0;
+    for (final idx in _servedChunks) {
+      n += _chunks[idx]?.length ?? _chunkLen(idx);
+    }
+    final size = fileSize;
+    if (size != null && n > size) return size;
+    return n;
+  }
+
+  int get uniqueFetchedBytes {
+    var n = 0;
+    for (final idx in _fetchedChunks) {
+      n += _chunks[idx]?.length ?? _chunkLen(idx);
+    }
+    final size = fileSize;
+    if (size != null && n > size) return size;
+    return n;
+  }
+
+  int _chunkLen(int idx) {
+    final size = fileSize;
+    if (size == null) return chunkSize;
+    final start = idx * chunkSize;
+    return min(chunkSize, size - start).clamp(0, chunkSize);
+  }
 
   void startStats() {
     _statsTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
       if (_closed) return;
+      if (_activeReads == 0 &&
+          lastServeAt != null &&
+          DateTime.now().difference(lastServeAt!) >
+              const Duration(seconds: 12)) {
+        _statsTimer?.cancel();
+        _statsTimer = null;
+        return;
+      }
       VodProxyLog.log(
-        'stats id=$id kind=$kind served=${_fmtBytes(_bytesServed)} '
-        'fetched=${_fmtBytes(_bytesFetched)} ${_throughput()} '
-        'ahead=${_fmtBytes(_aheadBytes)} cursor=$_cursor '
+        'stats id=$id kind=$kind served=${_fmtBytes(uniqueServedBytes)} '
+        'fetched=${_fmtBytes(uniqueFetchedBytes)} net=${_fmtBytes(_bytesNet)} '
+        '${_throughput()} ahead=${_fmtBytes(_aheadBytes)} cursor=$_cursor '
         'size=${fileSize ?? -1} hosts=${pool.describe()}',
       );
     });
@@ -66,7 +113,7 @@ class VodSession {
   String _throughput() {
     final sec = DateTime.now().difference(startedAt).inMilliseconds / 1000;
     if (sec <= 0) return '0MB/s';
-    return '${(_bytesFetched / sec / 1024 / 1024).toStringAsFixed(2)}MB/s';
+    return '${(uniqueFetchedBytes / sec / 1024 / 1024).toStringAsFixed(2)}MB/s';
   }
 
   static String _fmtBytes(int n) {
@@ -76,13 +123,18 @@ class VodSession {
     return '${(n / 1024).toStringAsFixed(0)}KB';
   }
 
-  /// Probe the original host for Content-Length / Content-Range total.
-  /// Must finish quickly: mpv waits on the first proxy response.
   Future<int> ensureSize({
-    Duration timeout = const Duration(seconds: 4),
+    Duration timeout = const Duration(seconds: 6),
   }) async {
     final known = fileSize;
-    if (known != null && known > 0) return known;
+    if (known != null && known > 0) {
+      if (!_probed) {
+        unawaited(_probeHosts());
+      }
+      return known;
+    }
+    await _probeHosts().timeout(timeout, onTimeout: () {});
+    if (fileSize != null && fileSize! > 0) return fileSize!;
     final probeEnd = chunkSize < 4096 ? chunkSize : 4096;
     final probe = await _fetchRange(
       ByteRange(0, probeEnd),
@@ -90,10 +142,6 @@ class VodSession {
     ).timeout(timeout);
     fileSize ??= probe.total;
     final size = fileSize ?? 0;
-    if (probe.bytes.isNotEmpty &&
-        probe.bytes.length >= (size > 0 ? min(probeEnd, size) : probeEnd)) {
-      // Not a full chunk — drop so _chunk(0) refetches the real slice.
-    }
     VodProxyLog.log(
       'size id=$id kind=$kind bytes=$size '
       'hosts=${pool.hosts.map((h) => h.host).join(",")}',
@@ -104,33 +152,81 @@ class VodSession {
     return size;
   }
 
+  Future<void> _probeHosts() async {
+    if (_probed || _closed) return;
+    _probed = true;
+    final targets = pool.hosts.take(8).toList();
+    if (targets.isEmpty) return;
+    const probeBytes = 128 * 1024;
+    await Future.wait(
+      targets.map((stat) async {
+        if (_closed) return;
+        try {
+          final result = await _get(
+            stat.url,
+            ByteRange(0, probeBytes),
+          ).timeout(const Duration(seconds: 3));
+          fileSize ??= result.total;
+          VodProxyLog.log(
+            'probe id=$id host=${stat.host} ttfb=${stat.avgTtfbMs.toStringAsFixed(0)}ms '
+            'thru=${(stat.emaBps * 8 / 1e6).toStringAsFixed(2)}Mbps status=ok',
+          );
+        } catch (e) {
+          pool.recordFailure(stat.url, reason: 'probe $e');
+          VodProxyLog.log(
+            'probe id=$id host=${stat.host} status=fail reason=$e',
+          );
+        }
+      }),
+    );
+    if (_closed) return;
+    pool.markOverseasWinnerIfNeeded();
+    final ranked = pool.topHosts(k: 6);
+    VodProxyLog.log(
+      'rank id=$id overseasWins=${pool.overseasWins} '
+      'hosts=${ranked.map((h) => '${h.host}:${(h.emaBps * 8 / 1e6).toStringAsFixed(1)}').join(",")}',
+    );
+    VodProxyLog.log(
+      'size id=$id kind=$kind bytes=${fileSize ?? -1} '
+      'hosts=${pool.hosts.map((h) => h.host).join(",")}',
+    );
+  }
+
   Stream<List<int>> read(int start, int endExclusive) async* {
     if (_closed) return;
-    _cursor = start;
+    final epoch = ++_readEpoch;
+    _activeReads++;
     startStats();
+    _cursor = start;
     _evict();
     unawaited(_prefetch(start));
-    var pos = start;
-    while (!_closed && pos < endExclusive) {
-      final idx = pos ~/ chunkSize;
-      final Uint8List chunk;
-      try {
-        chunk = await _chunk(idx, urgent: pos == start);
-      } on _SessionClosed {
-        return;
+    try {
+      var pos = start;
+      while (!_closed && epoch == _readEpoch && pos < endExclusive) {
+        final idx = pos ~/ chunkSize;
+        final Uint8List chunk;
+        try {
+          chunk = await _chunk(idx, urgent: pos == start);
+        } on _SessionClosed {
+          return;
+        }
+        if (_closed || epoch != _readEpoch) return;
+        final offset = pos - idx * chunkSize;
+        if (offset >= chunk.length) {
+          return;
+        }
+        final take = min(chunk.length - offset, endExclusive - pos);
+        yield chunk.sublist(offset, offset + take);
+        pos += take;
+        _cursor = pos;
+        _bytesDelivered += take;
+        _servedChunks.add(idx);
+        lastServeAt = DateTime.now();
+        _evict();
+        unawaited(_prefetch(pos));
       }
-      if (_closed) return;
-      final offset = pos - idx * chunkSize;
-      if (offset >= chunk.length) {
-        return;
-      }
-      final take = min(chunk.length - offset, endExclusive - pos);
-      yield chunk.sublist(offset, offset + take);
-      pos += take;
-      _cursor = pos;
-      _bytesServed += take;
-      _evict();
-      unawaited(_prefetch(pos));
+    } finally {
+      _activeReads = (_activeReads - 1).clamp(0, 1 << 20);
     }
   }
 
@@ -175,6 +271,7 @@ class VodSession {
         );
         fileSize ??= fetched.total;
         _chunks[idx] = fetched.bytes;
+        _fetchedChunks.add(idx);
         return fetched.bytes;
       } finally {
         _inflight.remove(idx);
@@ -197,8 +294,8 @@ class VodSession {
         final result = await _get(url, range).timeout(
           const Duration(seconds: 6),
         );
-        _bytesFetched += result.bytes.length;
         if (result.bytes.length != range.length) {
+          retries++;
           pool.recordFailure(url, reason: 'short-read');
           VodProxyLog.log(
             'retry id=$id range=$range from=$lastHost reason=short-read '
@@ -209,6 +306,7 @@ class VodSession {
         }
         return result;
       } on _Forbidden {
+        retries++;
         pool.recordFailure(
           url,
           reason: '403',
@@ -222,6 +320,7 @@ class VodSession {
         rethrow;
       } catch (e) {
         if (_closed) throw const _SessionClosed();
+        retries++;
         pool.recordFailure(url, reason: e.toString());
         VodProxyLog.log(
           'retry id=$id range=$range from=$lastHost reason=$e',
@@ -246,11 +345,14 @@ class VodSession {
     );
     req.followRedirects = true;
     final resp = await req.close().timeout(const Duration(seconds: 10));
+    final ttfbMs = sw.elapsedMilliseconds;
+    if (firstTtfbMs == 0) firstTtfbMs = ttfbMs;
     if (resp.statusCode == 403) {
       await resp.drain<void>().catchError((_) {});
       throw _Forbidden();
     }
     final body = await consolidate(resp);
+    _bytesNet += body.length;
     if (resp.statusCode == 206) {
       final parsed = ContentRangeReply.parse(
         resp.headers.value(HttpHeaders.contentRangeHeader),
@@ -266,6 +368,7 @@ class VodSession {
         url,
         bytes: slice.length,
         elapsedMs: sw.elapsedMilliseconds,
+        ttfbMs: ttfbMs,
       );
       return (bytes: slice, total: parsed.total);
     }
@@ -279,6 +382,7 @@ class VodSession {
           url,
           bytes: range.length,
           elapsedMs: sw.elapsedMilliseconds,
+          ttfbMs: ttfbMs,
         );
         return (
           bytes: body.sublist(0, range.length),
@@ -328,10 +432,28 @@ class VodSession {
     return true;
   }
 
-  void close() {
+  void logSessionEnd({String reason = 'close'}) {
+    if (_endLogged) return;
+    _endLogged = true;
+    VodProxyLog.log(
+      'session_end id=$id kind=$kind reason=$reason '
+      'served=${_fmtBytes(uniqueServedBytes)} '
+      'fetched=${_fmtBytes(uniqueFetchedBytes)} '
+      'net=${_fmtBytes(_bytesNet)} delivered=${_fmtBytes(_bytesDelivered)} '
+      'retries=$retries bans=${pool.banReasons.isEmpty ? 0 : pool.banReasons.join("|")} '
+      'ttfb=${firstTtfbMs}ms firstFrame=${VodProxyLog.firstFrameMs ?? '-'}ms '
+      'fallback=${fallbackReason ?? '-'} '
+      'hosts=${pool.sessionHostSummary()}',
+    );
+  }
+
+  void close({String reason = 'close'}) {
+    if (_closed) return;
     _closed = true;
+    _readEpoch++;
     _statsTimer?.cancel();
     _statsTimer = null;
+    logSessionEnd(reason: reason);
     _chunks.clear();
     _inflight.clear();
     _client.close(force: true);

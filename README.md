@@ -15,7 +15,7 @@
 | 应用名 | `PiliPala`（debug 为 `PiliPala debug`） | `PiliNara` |
 | 包名 `applicationId` | `com.tychen.pilipala` | `com.example.pilinara` |
 | 应用内检查更新 | [tyechan/PiliNara Releases](https://github.com/tyechan/PiliNara/releases) | Starfallan 官方 Releases |
-| 版本号 | `2.1.6-YYYYMMDD-btr-proxy` + `versionCode=YYYYMMDDNN` | `2.1.6-<commit>` + `git rev-list` |
+| 版本号 | `2.1.6-MMDDa` + `versionCode=YYYYMMDDNN`（关于页一行显示） | `2.1.6-<commit>` + `git rev-list` |
 | 点播加速 | 设置里有「多线程加速（实验）」 | 无 |
 
 **多线程加速（实验）**：应用内 `127.0.0.1` VOD 代理按 Range 并行拉流，可调连接数，带 host 池、节点耗时日志；探测失败或播放器打不开代理时回退直连。默认关闭，按需在播放设置里打开。
@@ -31,9 +31,10 @@
 
 ## 版本与更新
 
-- `versionName`：`2.1.6-YYYYMMDD-btr-proxy`
-- `versionCode`：`YYYYMMDD` + 当日序号，例如 `2026101503`
-- Git 标签：`v2.1.6-YYYYMMDD-btr-proxy+<短哈希>`
+- `versionName`：`2.1.6-MMDDa`（例如 `2.1.6-1016a`，不超过 16 字符）
+- 关于页一行：`2.1.6 · 1016 · <短哈希>`
+- `versionCode`：`YYYYMMDD` + 当日序号，例如 `2026101601`
+- Git 标签：`v2.1.6-1016a+<短哈希>`
 - 应用内检查更新只看本仓库 Release，用 `versionCode` 比较，不再用官方构建时间。
 
 ## 如何同步上游
