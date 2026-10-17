@@ -56,9 +56,8 @@ jobs:
           git apply $GITHUB_WORKSPACE/lib/scripts/modal_barrier_patch.diff || true
           git apply $GITHUB_WORKSPACE/lib/scripts/mouse_cursor_patch.diff || true
 
-      - name: Set and Extract version
-        shell: pwsh
-        run: lib/scripts/build.ps1 android
+      - name: Set fork version
+        run: bash lib/scripts/build_fork.sh
 
       # 核心修改点：使用 --debug 模式
       # 注意：Debug 模式下通常不使用 --split-per-abi，因为它会生成一个包含全架构的胖 APK
@@ -70,7 +69,7 @@ jobs:
         run: |
           mkdir -p output
           if [ -f "build/app/outputs/flutter-apk/app-debug.apk" ]; then
-            mv "build/app/outputs/flutter-apk/app-debug.apk" "output/PiliNara_android_debug_all.apk"
+            mv "build/app/outputs/flutter-apk/app-debug.apk" "output/PiliPala_android_debug_all.apk"
           fi
         shell: bash
 
@@ -79,4 +78,4 @@ jobs:
         with:
           archive: false
           name: Android_Debug_APK
-          path: output/PiliNara_android_debug_all.apk
+          path: output/PiliPala_android_debug_all.apk

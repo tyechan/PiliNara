@@ -1,6 +1,10 @@
 name: Android
 
 on:
+    push:
+        tags:
+            - "v*-btr-proxy*"
+            - "v2.1.6-*"
     pull_request:
         types:
             - opened
@@ -25,7 +29,7 @@ on:
 
 jobs:
     android:
-        if: ${{ github.event_name == 'pull_request' || github.event.inputs.build_android == 'true' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' || github.event.inputs.build_android == 'true' }}
         name: Release Android
         runs-on: ubuntu-latest
         permissions: write-all
@@ -54,34 +58,12 @@ jobs:
                   flutter-version-file: pubspec.yaml
                   cache: true
 
-            - name: revert new overscrollindicator
-              working-directory: ${{ env.FLUTTER_ROOT }}
-              run: |
-                git config --global user.name "ci"
-                git config --global user.email "example@example.com"
-                git stash || true
-                git revert 362b1de29974ffc1ed6faa826e1df870d7bec75f --no-edit
-                git reset --soft HEAD~1
-                git stash pop || true
-              continue-on-error: true
-
-            - name: apply bottom sheet patch
-              working-directory: ${{ env.FLUTTER_ROOT }}
-              run: git apply $GITHUB_WORKSPACE/lib/scripts/bottom_sheet_patch.diff || true
-              continue-on-error: true
-
-            - name: apply modal barrier patch
-              working-directory: ${{ env.FLUTTER_ROOT }}
-              run: git apply $GITHUB_WORKSPACE/lib/scripts/modal_barrier_patch.diff || true
-              continue-on-error: true
-
-            - name: apply mouse cursor patch
-              working-directory: ${{ env.FLUTTER_ROOT }}
-              run: git apply $GITHUB_WORKSPACE/lib/scripts/mouse_cursor_patch.diff || true
-              continue-on-error: true
+            - name: apply Flutter patches
+              shell: pwsh
+              run: lib/scripts/patch.ps1 android
 
             - name: Write key
-              if: github.event_name == 'workflow_dispatch'
+              if: ${{ github.event_name != 'pull_request' }}
               run: |
                   if [ ! -z "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
                     echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 --decode > android/app/key.jks
@@ -91,9 +73,8 @@ jobs:
                     echo keyPassword='${{ secrets.KEY_PASSWORD }}' >> android/key.properties
                   fi
 
-            - name: Set and Extract version
-              shell: pwsh
-              run: lib/scripts/build.ps1 android
+            - name: Set fork version
+              run: bash lib/scripts/build_fork.sh
 
             - name: flutter build apk
               run: flutter build apk --release --split-per-abi --dart-define-from-file=pili_release.json --pub
@@ -102,37 +83,37 @@ jobs:
               run: |
                   for file in build/app/outputs/flutter-apk/app-*-release.apk; do
                     abi=$(echo "$file" | sed -E 's|.*app-(.*)-release\.apk|\1|')
-                    mv "$file" "PiliNara_android_${{ env.version }}_${abi}.apk"
+                    mv "$file" "PiliPala-${{ env.version_name }}-${{ env.commit_hash }}_${abi}.apk"
                   done
               shell: bash
 
             - name: Release
-              if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' }}
+              if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '') }}
               uses: softprops/action-gh-release@v3
               with:
-                  tag_name: ${{ github.event.inputs.tag }}
-                  name: ${{ github.event.inputs.tag }}
+                  tag_name: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
+                  name: ${{ format('PiliPala {0} ({1})', env.version, env.version_code) }}
                   target_commitish: ${{ github.sha }}
                   files: |
-                      PiliNara_android_*.apk
+                      PiliPala-*.apk
 
             - name: 上传
               uses: actions/upload-artifact@v7
               with:
                   archive: false
                   name: Android_arm64-v8a
-                  path: PiliNara_android_*_arm64-v8a.apk
+                  path: PiliPala-*_arm64-v8a.apk
 
             - name: 上传
               uses: actions/upload-artifact@v7
               with:
                   archive: false
                   name: Android_armeabi-v7a
-                  path: PiliNara_android_*_armeabi-v7a.apk
+                  path: PiliPala-*_armeabi-v7a.apk
 
             - name: 上传
               uses: actions/upload-artifact@v7
               with:
                   archive: false
                   name: Android_x86_64
-                  path: PiliNara_android_*_x86_64.apk
+                  path: PiliPala-*_x86_64.apk

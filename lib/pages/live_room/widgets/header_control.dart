@@ -15,9 +15,10 @@ import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/common_btn.dart';
 import 'package:PiliPlus/services/shutdown_timer_service.dart'
     show shutdownTimerService;
-import 'package:PiliPlus/utils/android/bindings.g.dart';
+import 'package:PiliPlus/utils/android/android_helper.dart';
 import 'package:PiliPlus/utils/extension/context_ext.dart';
 import 'package:PiliPlus/utils/extension/size_ext.dart';
+import 'package:PiliPlus/utils/ios/pip_helper.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
@@ -117,11 +118,7 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
     const btnHeight = 30.0;
 
     return Padding(
-      padding: const .only(
-        left: 14,
-        right: 14,
-        top: (kToolbarHeight - btnHeight) / 2,
-      ),
+      padding: const .symmetric(horizontal: 14, vertical: 13),
       child: Row(
         children: [
           if (isFullScreen || plPlayerController.isDesktopPip)
@@ -171,16 +168,16 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
               ),
               onTap: widget.onSendDanmaku,
             ),
-          if (Platform.isAndroid || (PlatformUtils.isDesktop && !isFullScreen))
+          if ((Platform.isAndroid && PiliAndroidHelper.isPipAvailable) ||
+              (Platform.isIOS && IOSPipHelper.isAvailable) ||
+              (PlatformUtils.isDesktop && !isFullScreen))
             ComBtn(
               height: btnHeight,
               tooltip: '画中画',
               onTap: () {
                 if (PlatformUtils.isDesktop) {
                   plPlayerController.toggleDesktopPip();
-                  return;
-                }
-                if (AndroidHelper.isPipAvailable) {
+                } else {
                   plPlayerController.enterPip();
                 }
               },
@@ -289,6 +286,21 @@ class _LiveHeaderControlState extends State<LiveHeaderControl>
                         children: [
                           Icon(Icons.cast, size: 20),
                           Text('投屏', style: TextStyle(fontSize: 14)),
+                        ],
+                      ),
+                    ),
+                  // 全屏下也能进入（点击后先退全屏再收起）；系统 PiP 中没有控制栏，排除
+                  // 桌面小窗形态下不能 pop 本页，不提供入口
+                  if (!plPlayerController.isDesktopPip &&
+                      !plPlayerController.isPipMode)
+                    PopupMenuItem(
+                      height: 42,
+                      onTap: () => liveController.onRequestInAppPip?.call(),
+                      child: const Row(
+                        spacing: 8,
+                        children: [
+                          Icon(Icons.picture_in_picture_alt_outlined, size: 20),
+                          Text('应用内画中画', style: TextStyle(fontSize: 14)),
                         ],
                       ),
                     ),

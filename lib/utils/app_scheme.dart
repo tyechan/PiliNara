@@ -18,9 +18,11 @@ import 'package:PiliPlus/pages/live/view.dart';
 import 'package:PiliPlus/pages/rank/view.dart';
 import 'package:PiliPlus/pages/subscription_detail/view.dart';
 import 'package:PiliPlus/pages/video/reply_reply/view.dart';
+import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/id_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/parse_string.dart';
+import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/request_utils.dart';
 import 'package:PiliPlus/utils/url_utils.dart';
 import 'package:PiliPlus/utils/utils.dart';
@@ -42,7 +44,16 @@ abstract final class PiliScheme {
     appLinks = AppLinks();
 
     listener?.cancel();
-    listener = appLinks.uriLinkStream.listen(routePush);
+    listener = appLinks.uriLinkStream.listen(
+      PlatformUtils.isDesktop ? _desktopRoutePush : routePush,
+    );
+  }
+
+  static Future<bool> _desktopRoutePush(Uri uri) {
+    WindowController.instance.window
+      ?..show()
+      ..focus();
+    return routePush(uri);
   }
 
   static int? _videoProgress(Map<String, String> queryParameters) {
@@ -418,8 +429,8 @@ abstract final class PiliScheme {
           parameters: parameters,
         );
       default:
-        String? aid = IdUtils.avRegexExact.matchAsPrefix(path)?.group(1);
-        String? bvid = IdUtils.bvRegexExact.matchAsPrefix(path)?.group(0);
+        final aid = IdUtils.avRegexExact.matchAsPrefix(path)?.group(1);
+        final bvid = IdUtils.bvRegexExact.matchAsPrefix(path)?.group(0);
         if (aid != null || bvid != null) {
           videoPush(
             aid != null ? int.parse(aid) : null,
@@ -438,12 +449,12 @@ abstract final class PiliScheme {
 
   static const b23_tv = 'b23.tv';
   static const bilibili = 'bilibili.com';
-  static const bilibili_m = 'm.bilibili.com';
-  static const bilibili_t = 't.bilibili.com';
-  static const bilibili_live = 'live.bilibili.com';
-  static const bilibili_space = 'space.bilibili.com';
-  static const bilibili_search = 'search.bilibili.com';
-  static const bilibili_music = 'music.bilibili.com';
+  static const bilibili_m = 'm.$bilibili';
+  static const bilibili_t = 't.$bilibili';
+  static const bilibili_live = 'live.$bilibili';
+  static const bilibili_space = 'space.$bilibili';
+  static const bilibili_search = 'search.$bilibili';
+  static const bilibili_music = 'music.$bilibili';
 
   static Future<bool> _fullPathPush(
     Uri uri, {
@@ -474,13 +485,14 @@ abstract final class PiliScheme {
         uri = Uri.parse(redirectUrl);
         host = uri.host;
       }
-      if (!host.contains(bilibili)) {
-        launchURL();
-        return false;
-      }
     }
 
-    final String path = uri.path;
+    if (!host.contains(bilibili)) {
+      launchURL();
+      return false;
+    }
+
+    final path = uri.path;
     late final queryParameters = uri.queryParameters;
 
     if (host.contains(bilibili_t)) {
@@ -637,7 +649,7 @@ abstract final class PiliScheme {
                 bvid: bvid,
                 cid: cid,
                 dimension: res!.dimension,
-                title: res.title,
+                // title: res.title,
                 extraArguments: {
                   'sourceType': SourceType.playlist,
                   'favTitle': '播放列表',
@@ -910,7 +922,7 @@ abstract final class PiliScheme {
           progress: progress,
           off: off,
           dimension: res!.dimension,
-          title: res.title,
+          // title: res.title,
         );
       }
     } catch (e) {

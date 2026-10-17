@@ -160,6 +160,80 @@ abstract final class VideoUtils {
           ).toString();
   }
 
+  /// Hosts to try when the current video CDN appears to serve a corrupt
+  /// byte stream. `mirrorcosov` is omitted on purpose: both S26 Ultra
+  /// freezes used it for the VIDEO m4s.
+  static const rotateFallbackHosts = [
+    'upos-sz-mirrorali.bilivideo.com',
+    'upos-sz-mirrorhw.bilivideo.com',
+    'upos-hz-mirrorakam.akamaized.net',
+    'upos-sz-mirrorcos.bilivideo.com',
+  ];
+
+  /// Replace the media host, keeping scheme/path/query (signed URLs).
+  /// Unknown hosts jump to the first fallback.
+  ///
+  /// Mainland (plus measurable akam) hosts rewritten into the VOD proxy pool.
+  static const proxyMainlandHosts = [
+    'upos-sz-mirrorali.bilivideo.com',
+    'upos-sz-mirrorhw.bilivideo.com',
+    'upos-sz-mirrorcos.bilivideo.com',
+    'upos-sz-mirrorcosov.bilivideo.com',
+    'upos-sz-mirroralib.bilivideo.com',
+    'upos-sz-mirrorhwb.bilivideo.com',
+    'upos-hz-mirrorakam.akamaized.net',
+  ];
+
+  /// Unique host-rewritten URLs: original + extras + user CDN + mainland list.
+  static List<String> candidateMediaUrls(
+    String primary, {
+    Iterable<String> extras = const [],
+  }) {
+    final seen = <String>{};
+    final out = <String>[];
+
+    void add(String url) {
+      final uri = Uri.tryParse(url);
+      if (uri == null || uri.host.isEmpty) return;
+      if (!_isReplaceableMediaHost(uri.host)) return;
+      final host = uri.host.toLowerCase();
+      if (!seen.add(host)) return;
+      out.add(uri.replace(host: host).toString());
+    }
+
+    add(primary);
+    for (final extra in extras) {
+      add(extra);
+    }
+    final base = Uri.tryParse(primary);
+    if (base != null && _isReplaceableMediaHost(base.host)) {
+      try {
+        final custom = customCDNUrl;
+        if (custom != null) {
+          add(base.replace(host: custom).toString());
+        }
+      } catch (_) {}
+      for (final host in proxyMainlandHosts) {
+        add(base.replace(host: host).toString());
+      }
+    }
+    return out;
+  }
+
+  static String rotateMediaHost(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty || !_isReplaceableMediaHost(uri.host)) {
+      return url;
+    }
+    final current = uri.host.toLowerCase();
+    final idx = rotateFallbackHosts.indexWhere((h) => h == current);
+    final next = rotateFallbackHosts[(idx + 1) % rotateFallbackHosts.length];
+    if (next == current) {
+      return url;
+    }
+    return uri.replace(host: next).toString();
+  }
+
   static String getLiveCdnUrl(CodecItem e, {int index = 0}) {
     final urlInfo = e.urlInfo.getOrFirst(index);
     return (liveCdnUrl ?? urlInfo.host) + e.baseUrl + urlInfo.extra;

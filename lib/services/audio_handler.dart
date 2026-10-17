@@ -2,9 +2,6 @@ import 'dart:io' show File, Platform;
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:get/get.dart';
-import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
-import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
-import 'package:PiliPlus/pages/video/introduction/local/controller.dart';
 import 'package:PiliPlus/pages/audio/controller.dart';
 
 import 'package:PiliPlus/common/constants.dart';
@@ -14,6 +11,10 @@ import 'package:PiliPlus/models_new/live/live_room_info_h5/data.dart';
 import 'package:PiliPlus/models_new/pgc/pgc_info_model/episode.dart';
 import 'package:PiliPlus/models_new/video/video_detail/data.dart';
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
+import 'package:PiliPlus/pages/common/common_intro_controller.dart';
+import 'package:PiliPlus/pages/video/introduction/local/controller.dart';
+import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
+import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
@@ -22,6 +23,9 @@ import 'package:PiliPlus/utils/path_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:collection/collection.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:get/get_core/src/get_main.dart';
+import 'package:get/get_instance/src/extension_instance.dart';
 import 'package:path/path.dart' as path;
 
 Future<VideoPlayerServiceHandler> initAudioService() {
@@ -40,6 +44,13 @@ Future<VideoPlayerServiceHandler> initAudioService() {
   );
 }
 
+typedef _StatusConfig = (
+  PlayerStatus status,
+  bool isBuffering,
+  bool isLive,
+  double speed,
+);
+
 class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   static final List<MediaItem> _item = [];
   bool enableBackgroundPlay = Pref.enableBackgroundPlay;
@@ -47,8 +58,8 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   Future<void>? Function()? onPlay;
   Future<void>? Function()? onPause;
   Future<void>? Function(Duration position)? onSeek;
-  Future<void>? Function()? onSkipToNext;
-  Future<void>? Function()? onSkipToPrevious;
+  void Function()? onSkipToNext;
+  void Function()? onSkipToPrevious;
   String? currentHeroTag;
 
   void _clearCallbacks() {
@@ -62,18 +73,10 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   void _emitIdleState() {
     if (playbackState.value.processingState == AudioProcessingState.idle) {
       playbackState.add(
-        PlaybackState(
-          processingState: AudioProcessingState.completed,
-          playing: false,
-        ),
+        PlaybackState(processingState: .completed, playing: false),
       );
     }
-    playbackState.add(
-      PlaybackState(
-        processingState: AudioProcessingState.idle,
-        playing: false,
-      ),
-    );
+    playbackState.add(PlaybackState(processingState: .idle, playing: false));
   }
 
   void _clearCurrentSession({bool clearItems = true}) {
@@ -84,6 +87,8 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
       _item.clear();
     }
     currentHeroTag = null;
+    _lastPos = null;
+    _lastConfig = null;
     _clearCallbacks();
     _emitIdleState();
   }
@@ -91,10 +96,14 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> skipToNext() async {
     if (onSkipToNext != null) {
-      await onSkipToNext?.call();
+      onSkipToNext?.call();
       return;
     }
-    if (currentHeroTag == null) return;
+    // currentHeroTag 未设时退回上游的 playOwner 派发（两者都由视频页写入）
+    if (currentHeroTag == null) {
+      _findIntroController()?.nextPlay();
+      return;
+    }
     // 优先匹配 AudioController（听视频模式）
     try {
       final ctr = Get.find<AudioController>(tag: currentHeroTag!);
@@ -118,10 +127,13 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> skipToPrevious() async {
     if (onSkipToPrevious != null) {
-      await onSkipToPrevious?.call();
+      onSkipToPrevious?.call();
       return;
     }
-    if (currentHeroTag == null) return;
+    if (currentHeroTag == null) {
+      _findIntroController()?.prevPlay();
+      return;
+    }
     // 优先匹配 AudioController（听视频模式）
     try {
       final ctr = Get.find<AudioController>(tag: currentHeroTag!);
@@ -147,25 +159,39 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     return onPlay?.call() ??
         PlPlayerController.playIfExists() ??
         Future.syncValue(null);
-    // player.play();
   }
 
   @override
   Future<void> pause() {
-    return onPause?.call() ?? PlPlayerController.pauseIfExists();
-    // player.pause();
+    return onPause?.call() ??
+        PlPlayerController.pauseIfExists() ??
+        Future.syncValue(null);
   }
+
+  CommonIntroController? _findIntroController() {
+    final playOwner = PlPlayerController.playOwner;
+    if (playOwner != null) {
+      final tag = playOwner.tag;
+      try {
+        return switch (playOwner.type) {
+          UgcIntroController => Get.find<UgcIntroController>(tag: tag),
+          PgcIntroController => Get.find<PgcIntroController>(tag: tag),
+          LocalIntroController => Get.find<LocalIntroController>(tag: tag),
+          _ => throw UnimplementedError(playOwner.type.toString()),
+        };
+      } catch (_) {
+        if (kDebugMode) rethrow;
+      }
+    }
+    return null;
+  }
+
 
   @override
   Future<void> seek(Duration position) {
-    playbackState.add(
-      playbackState.value.copyWith(
-        updatePosition: position,
-      ),
-    );
-    return (onSeek?.call(position) ??
-        PlPlayerController.seekToIfExists(position, isSeek: false));
-    // await player.seekTo(position);
+    return onSeek?.call(position) ??
+        PlPlayerController.seekToIfExists(position, isSeek: false) ??
+        Future.syncValue(null);
   }
 
   void setMediaItem(MediaItem newMediaItem) {
@@ -205,35 +231,72 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     return false;
   }
 
-  void setPlaybackState(
+  Duration? _lastPos;
+  _StatusConfig? _lastConfig;
+  void onUpdateState(
     PlayerStatus status,
     bool isBuffering,
-    bool isLive,
-  ) {
+    bool isLive, {
+    required Duration position,
+    required double speed,
+    String? debugLabel,
+  }) {
     if (!enableBackgroundPlay ||
         _item.isEmpty ||
         !PlPlayerController.instanceExists()) {
       return;
     }
 
-    final AudioProcessingState processingState;
-    if (status.isCompleted) {
-      processingState = AudioProcessingState.completed;
-    } else if (isBuffering) {
-      processingState = AudioProcessingState.buffering;
-    } else {
-      processingState = AudioProcessingState.ready;
+    if (onPlay != null && debugLabel == 'onVideoPaused') return;
+
+    final newConfig = (status, isBuffering, isLive, speed);
+    if (_lastConfig == newConfig) {
+      if (_lastPos != null) {
+        final pos = position.inSeconds;
+        final lastPos = _lastPos!.inSeconds;
+        _lastPos = position;
+        if (pos == lastPos && pos != 0) return;
+      }
     }
+    _lastConfig = newConfig;
 
-    final playing = status.isPlaying;
+    final AudioProcessingState processingState;
+    final bool playing;
+    switch (status) {
+      case .completed:
+        playing = false;
+        processingState = .completed;
+      case .playing:
+        playing = true;
+        processingState = isBuffering ? .buffering : .ready;
+      case .paused:
+        playing = isBuffering;
+        processingState = isBuffering ? .buffering : .ready;
+    }
+    _updateState(
+      processingState,
+      playing,
+      isLive,
+      position: position,
+      speed: speed,
+    );
+  }
 
+  void _updateState(
+    AudioProcessingState state,
+    bool playing,
+    bool isLive, {
+    required Duration position,
+    required double speed,
+  }) {
     final hasEpisodes = _hasEpisodes();
 
     final controls = <MediaControl>[
       if (!isLive && hasEpisodes) MediaControl.skipToPrevious,
-      MediaControl.rewind.copyWith(
-        androidIcon: 'drawable/ic_player_rewind_10s',
-      ),
+      if (!isLive)
+        MediaControl.rewind.copyWith(
+          androidIcon: 'drawable/ic_player_rewind_10s',
+        ),
       if (playing)
         MediaControl.pause.copyWith(
           androidIcon: 'drawable/ic_player_pause',
@@ -242,9 +305,10 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
         MediaControl.play.copyWith(
           androidIcon: 'drawable/ic_player_play',
         ),
-      MediaControl.fastForward.copyWith(
-        androidIcon: 'drawable/ic_player_fast_forward_10s',
-      ),
+      if (!isLive)
+        MediaControl.fastForward.copyWith(
+          androidIcon: 'drawable/ic_player_fast_forward_10s',
+        ),
       if (!isLive && hasEpisodes) MediaControl.skipToNext,
     ];
 
@@ -265,20 +329,19 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     } else {
       compactIndices = List.generate(controls.length, (i) => i);
     }
-
     playbackState.add(
       playbackState.value.copyWith(
-        processingState: isBuffering
-            ? AudioProcessingState.buffering
-            : processingState,
+        processingState: state,
+        updatePosition: position,
+        speed: speed,
         controls: controls,
         androidCompactActionIndices: compactIndices,
         playing: playing,
         systemActions: {
           MediaAction.seek,
           if (!isLive && hasEpisodes) MediaAction.skipToPrevious,
-          MediaAction.rewind,
-          MediaAction.fastForward,
+          if (!isLive) MediaAction.rewind,
+          if (!isLive) MediaAction.fastForward,
           if (!isLive && hasEpisodes) MediaAction.skipToNext,
         },
       ),
@@ -294,13 +357,6 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  void onStatusChange(PlayerStatus status, bool isBuffering, isLive) {
-    if (!enableBackgroundPlay) return;
-
-    if (_item.isEmpty) return;
-    setPlaybackState(status, isBuffering, isLive);
-  }
-
   void onVideoDetailChange(
     dynamic data,
     int cid,
@@ -314,7 +370,6 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     //   debugPrint('当前调用栈为：');
     //   debugPrint(StackTrace.current);
     // }
-    if (!PlPlayerController.instanceExists()) return;
     if (data == null) return;
 
     // Windows SMTC 弹窗由 shell 进程渲染，仅支持系统内置解码器，WebP 会静默不显示，
@@ -418,22 +473,13 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     _clearCurrentSession(clearItems: false);
   }
 
+  void clearIfNeeded() {
+    if (!enableBackgroundPlay) return;
+    if (_item.isEmpty) clear();
+  }
+
   void clear() {
     if (!enableBackgroundPlay) return;
     _clearCurrentSession();
-  }
-
-  void onPositionChange(Duration position) {
-    if (!enableBackgroundPlay ||
-        _item.isEmpty ||
-        !PlPlayerController.instanceExists()) {
-      return;
-    }
-
-    playbackState.add(
-      playbackState.value.copyWith(
-        updatePosition: position,
-      ),
-    );
   }
 }

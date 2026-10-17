@@ -47,9 +47,17 @@ abstract final class Update {
         }
         return;
       }
-      final int latest =
-          DateTime.parse(data['created_at']).millisecondsSinceEpoch ~/ 1000;
-      if (BuildConfig.buildTime >= latest) {
+      final assets = data['assets'] as List? ?? const [];
+      final remoteCode = parseRemoteVersionCode(
+        tagName: data['tag_name']?.toString(),
+        name: data['name']?.toString(),
+        body: data['body']?.toString(),
+        assetNames: assets.map((e) => e['name']?.toString() ?? ''),
+      );
+      if (!isRemoteNewer(
+        localVersionCode: BuildConfig.versionCode,
+        remoteVersionCode: remoteCode,
+      )) {
         if (!isAuto) {
           SmartDialog.showToast('已是最新版本');
         }
@@ -113,10 +121,10 @@ abstract final class Update {
                   ),
                 TextButton(
                   onPressed: SmartDialog.dismiss,
-                  child: Text(
-                    '取消',
-                    style: TextStyle(color: colorScheme.outline), 
-                  ),
+                    child: Text(
+                      '取消',
+                      style: TextStyle(color: colorScheme.outline),
+                    ),
                 ),
                 if (Platform.isWindows) ...[
                   downloadBtn('zip', ext: 'zip'),
@@ -201,5 +209,43 @@ abstract final class Update {
       );
     }
     return null;
+  }
+
+  /// 从本仓库 GitHub Release 的 tag / 标题 / 正文 / 附件名解析 10 位
+  /// `YYYYMMDDNN` versionCode（例如 `2026101503`）。
+  ///
+  /// 旧 tag `v2.1.6-20261015-btr-proxy+hash` 不含 versionCode 时，回落到
+  /// `YYYYMMDD00`，避免把同日旧包误判成更新。
+  static int? parseRemoteVersionCode({
+    String? tagName,
+    String? name,
+    String? body,
+    Iterable<String> assetNames = const [],
+  }) {
+    final versionCodeRe = RegExp(r'(?<!\d)(20\d{8})(?!\d)');
+    for (final value in [name, tagName, body, ...assetNames]) {
+      if (value == null || value.isEmpty) continue;
+      final match = versionCodeRe.firstMatch(value);
+      if (match != null) {
+        return int.parse(match.group(1)!);
+      }
+    }
+    final dateRe = RegExp(r'(\d+\.\d+\.\d+)-(\d{8})-btr-proxy');
+    for (final value in [tagName, name]) {
+      if (value == null || value.isEmpty) continue;
+      final match = dateRe.firstMatch(value);
+      if (match != null) {
+        return int.parse('${match.group(2)}00');
+      }
+    }
+    return null;
+  }
+
+  static bool isRemoteNewer({
+    required int localVersionCode,
+    required int? remoteVersionCode,
+  }) {
+    if (remoteVersionCode == null) return false;
+    return remoteVersionCode > localVersionCode;
   }
 }

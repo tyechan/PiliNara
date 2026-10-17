@@ -1,4 +1,5 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:media_kit/media_kit.dart';
 
 /// 小窗控制按钮:固定触控目标 + hover 高亮。
 ///
@@ -54,6 +55,53 @@ class _PipControlButtonState extends State<PipControlButton> {
             child: Center(child: widget.icon),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Play/pause for the in-app mini window.
+///
+/// [PlPlayerController.playerStatus] is a plain enum after upstream
+/// `e4185e5b1` (not an Rx). Wrapping `playerStatus == playing` in Obx
+/// throws GetX "improper use of Obx" and becomes a grey ErrorWidget that
+/// fills the unconstrained mini-window Row. Listen to media_kit instead,
+/// same as [PlayOrPauseButton].
+class PipPlayPauseButton extends StatelessWidget {
+  const PipPlayPauseButton({
+    super.key,
+    required this.targetSize,
+    required this.onToggle,
+    this.player,
+    this.isPlaying = false,
+  });
+
+  final double targetSize;
+  final VoidCallback onToggle;
+  final Player? player;
+  final bool isPlaying;
+
+  @override
+  Widget build(BuildContext context) {
+    final player = this.player;
+    if (player == null) {
+      return _icon(isPlaying);
+    }
+    return StreamBuilder<bool>(
+      stream: player.stream.playing,
+      initialData: player.state.playing,
+      builder: (context, snapshot) => _icon(snapshot.data ?? false),
+    );
+  }
+
+  Widget _icon(bool playing) {
+    return PipControlButton(
+      targetSize: targetSize,
+      onTap: onToggle,
+      icon: Icon(
+        playing ? Icons.pause : Icons.play_arrow,
+        color: Colors.white,
+        size: 30,
       ),
     );
   }

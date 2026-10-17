@@ -13,6 +13,7 @@ import 'package:PiliPlus/models/common/dynamic/dynamics_type.dart';
 import 'package:PiliPlus/models/common/dynamic/up_panel_position.dart';
 import 'package:PiliPlus/models/common/follow_order_type.dart';
 import 'package:PiliPlus/models/common/member/tab_type.dart';
+import 'package:PiliPlus/models/common/mine_tab_type.dart';
 import 'package:PiliPlus/models/common/msg/msg_unread_type.dart';
 import 'package:PiliPlus/models/common/nav_bar_config.dart';
 import 'package:PiliPlus/models/common/rcmd_mode.dart';
@@ -478,9 +479,7 @@ abstract final class Pref {
 
   static String get hardwareDecoding => _setting.get(
     SettingBoxKey.hardwareDecoding,
-    defaultValue: Platform.isAndroid
-        ? HwDecType.androidDefault
-        : HwDecType.auto.hwdec,
+    defaultValue: HwDecType.kHwdec,
   );
 
   static String get videoSync =>
@@ -868,6 +867,9 @@ abstract final class Pref {
   static bool get removeOnlyFansVideoDyn =>
       _setting.get(SettingBoxKey.removeOnlyFansVideoDyn, defaultValue: false);
 
+  static bool get removeDynVideoDyn =>
+      _setting.get(SettingBoxKey.removeDynVideoDyn, defaultValue: false);
+
   static bool get antiGoodsReply =>
       _setting.get(SettingBoxKey.antiGoodsReply, defaultValue: false);
 
@@ -1110,6 +1112,39 @@ abstract final class Pref {
   static bool get enableLog =>
       _setting.get(SettingBoxKey.enableLog, defaultValue: true);
 
+  static bool get vodMultiConnProxy =>
+      _setting.get(SettingBoxKey.vodMultiConnProxy, defaultValue: true);
+
+  static int get vodMultiConnThreads {
+    final raw = _setting.get(
+      SettingBoxKey.vodMultiConnThreads,
+      defaultValue: 6,
+    );
+    if (raw is int) return raw.clamp(1, 16);
+    if (raw is num) return raw.round().clamp(1, 16);
+    return 6;
+  }
+
+  static int get vodMultiConnWindowMb {
+    final raw = _setting.get(
+      SettingBoxKey.vodMultiConnWindowMb,
+      defaultValue: 32,
+    );
+    if (raw is int) return raw.clamp(8, 64);
+    if (raw is num) return raw.round().clamp(8, 64);
+    return 32;
+  }
+
+  static int get vodMultiConnChunkKb {
+    final raw = _setting.get(
+      SettingBoxKey.vodMultiConnChunkKb,
+      defaultValue: 512,
+    );
+    if (raw is int) return raw.clamp(256, 1024);
+    if (raw is num) return raw.round().clamp(256, 1024);
+    return 512;
+  }
+
   static bool get disableAudioCDN =>
       _setting.get(SettingBoxKey.disableAudioCDN, defaultValue: false);
 
@@ -1221,6 +1256,9 @@ abstract final class Pref {
 
   static bool get enableShowLiveDanmaku =>
       _setting.get(SettingBoxKey.enableShowLiveDanmaku, defaultValue: true);
+
+  static bool get enableDanmakuMask =>
+      _setting.get(SettingBoxKey.enableDanmakuMask, defaultValue: false);
 
   static bool get enableQuickFav =>
       _setting.get(SettingBoxKey.enableQuickFav, defaultValue: false);
@@ -1349,6 +1387,9 @@ abstract final class Pref {
       'demuxer-hysteresis-secs': (bufSec / 1.5).toStringAsFixed(3),
       'demuxer-max-bytes': bufSiz,
       'demuxer-max-back-bytes': bufSiz,
+      // Only options without commas: media_kit extras split on ','.
+      // stream-lavf-o is set via player.setProperty instead.
+      'demuxer-lavf-o': 'fflags=+discardcorrupt',
     };
   }
 
@@ -1373,6 +1414,9 @@ abstract final class Pref {
 
   static bool get enableOnlineTotal =>
       _setting.get(SettingBoxKey.enableOnlineTotal, defaultValue: false);
+
+  static bool get enableDmCount =>
+      _setting.get(SettingBoxKey.enableDmCount, defaultValue: false);
 
   static bool get autoEnterFullScreen =>
       _setting.get(SettingBoxKey.enableAutoEnter, defaultValue: false);
@@ -1419,8 +1463,10 @@ abstract final class Pref {
   static bool get continuePlayInBackground =>
       _setting.get(SettingBoxKey.continuePlayInBackground, defaultValue: false);
 
-  static bool get autoAudioOnlyInBackground =>
-      _setting.get(SettingBoxKey.autoAudioOnlyInBackground, defaultValue: false);
+  static bool get autoAudioOnlyInBackground => _setting.get(
+    SettingBoxKey.autoAudioOnlyInBackground,
+    defaultValue: false,
+  );
 
   static bool get directExitOnBack =>
       _setting.get(SettingBoxKey.directExitOnBack, defaultValue: false);
@@ -1450,17 +1496,32 @@ abstract final class Pref {
   static bool get showFsLockBtnRight =>
       _setting.get(SettingBoxKey.showFsLockBtnRight, defaultValue: false);
 
+  static bool get lockFsRotation =>
+      _setting.get(SettingBoxKey.lockFsRotation, defaultValue: false);
+
   static bool get silentDownImg =>
       _setting.get(SettingBoxKey.silentDownImg, defaultValue: false);
 
   static String get buvid {
-    String? buvid = _localCache.get(LocalCacheKey.buvid);
-    if (buvid == null) {
-      buvid = LoginUtils.generateBuvid();
-      _localCache.put(LocalCacheKey.buvid, buvid);
+    String? value = _setting.get(SettingBoxKey.buvid);
+    if (value != null) return value;
+
+    value = _localCache.get(SettingBoxKey.buvid);
+    if (value != null) {
+      _setting
+          .put(SettingBoxKey.buvid, value)
+          .whenComplete(() => _localCache.delete(SettingBoxKey.buvid));
+      return value;
     }
-    return buvid;
+
+    if (value == null) {
+      buvid = value = LoginUtils.generateBuvid();
+    }
+
+    return value;
   }
+
+  static set buvid(String value) => _setting.put(SettingBoxKey.buvid, value);
 
   static bool get showMemberShop =>
       _setting.get(SettingBoxKey.showMemberShop, defaultValue: false);
@@ -1542,6 +1603,8 @@ abstract final class Pref {
       _setting.get(SettingBoxKey.enableVolumeBoost, defaultValue: false);
 
   static String? get downloadPath => _setting.get(SettingBoxKey.downloadPath);
+
+  static String? get imageSavePath => _setting.get(SettingBoxKey.imageSavePath);
 
   static String? get liveCdnUrl => _setting.get(SettingBoxKey.liveCdnUrl);
 
@@ -1630,6 +1693,22 @@ abstract final class Pref {
   static set aiPromptTemplates(String value) =>
       _setting.put(SettingBoxKey.aiPromptTemplates, value);
 
+  static bool get aiAutoScroll =>
+      _setting.get(SettingBoxKey.aiAutoScroll, defaultValue: true);
+
+  static set aiAutoScroll(bool value) =>
+      _setting.put(SettingBoxKey.aiAutoScroll, value);
+
+  /// 思考强度（reasoning_effort）：未干预服务商默认行为时为 'default'。
+  static String get aiReasoningEffort {
+    final value =
+        _setting.get(SettingBoxKey.aiReasoningEffort, defaultValue: 'default');
+    return value == 'auto' ? 'default' : value;
+  }
+
+  static set aiReasoningEffort(String value) =>
+      _setting.put(SettingBoxKey.aiReasoningEffort, value);
+
   static int get angleDegrees =>
       _setting.get(SettingBoxKey.angleDegrees, defaultValue: 30);
 
@@ -1654,8 +1733,7 @@ abstract final class Pref {
   static int get videoSaturation =>
       _videoPictureParameter(SettingBoxKey.videoSaturation);
 
-  static int get videoGamma =>
-      _videoPictureParameter(SettingBoxKey.videoGamma);
+  static int get videoGamma => _videoPictureParameter(SettingBoxKey.videoGamma);
 
   static int get videoHue => _videoPictureParameter(SettingBoxKey.videoHue);
 
@@ -1680,11 +1758,48 @@ abstract final class Pref {
   );
 
   /// 已导入字体的显示名：字体族名 → 从字体文件解析出的名字
-  static Map<String, String> get customAppFontNames =>
-      Map<String, String>.from(
-        _setting.get(
-          SettingBoxKey.customAppFontNames,
-          defaultValue: const <String, String>{},
-        ),
-      );
+  static Map<String, String> get customAppFontNames => Map<String, String>.from(
+    _setting.get(
+      SettingBoxKey.customAppFontNames,
+      defaultValue: const <String, String>{},
+    ),
+  );
+
+  static bool get enableEmoteTooltip =>
+      _setting.get(SettingBoxKey.enableEmoteTooltip, defaultValue: false);
+
+  static Set<MineTabType> get mineTabs {
+    final cache = _setting.get(SettingBoxKey.mineTabs) as List?;
+    if (cache != null && cache.isNotEmpty) {
+      return cache
+          .whereType<int>()
+          .where((i) => i >= 0 && i < MineTabType.values.length)
+          .map((i) => MineTabType.values[i])
+          .toSet();
+    }
+    // 旧版「我的页卡片编辑」键 mineCardSort 存的是 MineCardType 索引：
+    // history=0, fav=1, toView=2 → history / favorite / later
+    final legacy = _setting.get(SettingBoxKey.mineCardSort) as List?;
+    if (legacy != null && legacy.isNotEmpty) {
+      const legacyMap = <int, MineTabType>{
+        0: MineTabType.history,
+        1: MineTabType.favorite,
+        2: MineTabType.later,
+      };
+      final tabs = legacy
+          .whereType<int>()
+          .map((i) => legacyMap[i])
+          .whereType<MineTabType>()
+          .toSet();
+      if (tabs.isNotEmpty) {
+        _setting.put(
+          SettingBoxKey.mineTabs,
+          tabs.map((e) => e.index).toList(),
+        );
+        _setting.delete(SettingBoxKey.mineCardSort);
+        return tabs;
+      }
+    }
+    return MineTabType.kDefault;
+  }
 }

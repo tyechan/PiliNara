@@ -28,7 +28,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.pilinara"
+        applicationId = "com.tychen.pilipala"
         minSdk = flutter.minSdkVersion
         targetSdk = 37
         versionCode = flutter.versionCode
@@ -43,7 +43,7 @@ android {
             it.load(properties.inputStream())
     }
 
-    val config = keyProperties.getProperty("storeFile")?.let {
+    val releaseSigning = keyProperties.getProperty("storeFile")?.let {
         signingConfigs.create("release") {
             storeFile = file(it)
             storePassword = keyProperties.getProperty("storePassword")
@@ -61,25 +61,26 @@ android {
     }
 
     buildTypes {
-        all {
-            signingConfig = config ?: signingConfigs["debug"]
+        debug {
+            applicationIdSuffix = ".debug"
+            signingConfig = signingConfigs.getByName("debug")
         }
         release {
+            // Release uses the dedicated keystore when present; otherwise
+            // falls back to the debug keystore so local/PR builds still work.
+            signingConfig = releaseSigning ?: signingConfigs.getByName("debug")
             if (project.hasProperty("dev")) {
                 applicationIdSuffix = ".dev"
                 resValue(
                     type = "string",
                     name = "app_name",
-                    value = "PiliPlus dev",
+                    value = "PiliPala dev",
                 )
             }
-//            proguardFiles(
-//                getDefaultProguardFile("proguard-android-optimize.txt"),
-//                "proguard-rules.pro"
-//            )
-        }
-        debug {
-            applicationIdSuffix = ".debug"
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 

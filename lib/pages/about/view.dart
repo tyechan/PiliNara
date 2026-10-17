@@ -14,7 +14,7 @@ import 'package:PiliPlus/pages/mine/controller.dart';
 import 'package:PiliPlus/services/logger.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/accounts/account.dart';
-import 'package:PiliPlus/utils/android/android_helper.dart';
+import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/app_scheme.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
@@ -41,8 +41,7 @@ class AboutPage extends StatefulWidget {
 }
 
 class _AboutPageState extends State<AboutPage> {
-  final currentVersion =
-      '${BuildConfig.versionName}+${BuildConfig.versionCode}';
+  final currentVersion = BuildConfig.buildId;
   RxString cacheSize = ''.obs;
 
   late int _pressCount = 0;
@@ -62,7 +61,7 @@ class _AboutPageState extends State<AboutPage> {
   void getCacheSize() {
     CacheManager.loadApplicationCache().then((res) {
       if (mounted) {
-        cacheSize.value = CacheManager.formatSize(res);
+        cacheSize.value = res.formatSize;
       }
     });
   }
@@ -126,7 +125,7 @@ class _AboutPageState extends State<AboutPage> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
-                  '基于PiliPlus做了一些自用修改',
+                  'PiliNara 个人分支（多线程点播代理）',
                   style: TextStyle(color: outline),
                   semanticsLabel: '与你一起，发现不一样的世界',
                 ),
@@ -146,16 +145,20 @@ class _AboutPageState extends State<AboutPage> {
                 : () => Utils.copyText(currentVersion),
             title: const Text('当前版本'),
             leading: const Icon(Icons.commit_outlined),
-            trailing: Text(
-              currentVersion,
+            subtitle: Text(
+              BuildConfig.displayVersion,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: subTitleStyle,
             ),
           ),
           ListTile(
-            title: Text(
-              '''
-Build Time: ${DateFormatUtils.format(BuildConfig.buildTime, format: DateFormatUtils.longFormatDs)}
-Commit Hash: ${BuildConfig.commitHash}''',
+            title: const Text('构建信息'),
+            subtitle: Text(
+              'versionName ${BuildConfig.versionName}\n'
+              'versionCode ${BuildConfig.versionCode}\n'
+              'Build Time: ${DateFormatUtils.format(BuildConfig.buildTime, format: DateFormatUtils.longFormatDs)}\n'
+              'Commit Hash: ${BuildConfig.commitHash}',
               style: const TextStyle(fontSize: 14),
             ),
             leading: const Icon(Icons.info_outline),
@@ -175,18 +178,24 @@ Commit Hash: ${BuildConfig.commitHash}''',
           ListTile(
             onTap: () => PageUtils.launchURL(Constants.sourceCodeUrl),
             leading: const Icon(Icons.code),
-            title: const Text('Source Code'),
+            title: const Text('本仓库'),
             subtitle: Text(Constants.sourceCodeUrl, style: subTitleStyle),
+          ),
+          ListTile(
+            onTap: () => PageUtils.launchURL(Constants.naraCodeUrl),
+            leading: const Icon(Icons.code),
+            title: const Text('PiliNara 上游'),
+            subtitle: Text(Constants.naraCodeUrl, style: subTitleStyle),
           ),
           ListTile(
             onTap: () => PageUtils.launchURL(Constants.upstreamCodeUrl),
             leading: const Icon(Icons.code),
-            title: const Text('Upstream Code'),
+            title: const Text('PiliPlus 上游'),
             subtitle: Text(Constants.upstreamCodeUrl, style: subTitleStyle),
           ),
           if (Platform.isAndroid)
             ListTile(
-              onTap: PiliAndroidHelper.openLinkVerifySettings,
+              onTap: AndroidHelper.openLinkVerifySettings,
               leading: const Icon(MdiIcons.linkBoxOutline),
               title: const Text('打开受支持的链接'),
               trailing: Icon(Icons.arrow_forward, size: 16, color: outline),

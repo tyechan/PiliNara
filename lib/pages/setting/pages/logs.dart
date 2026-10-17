@@ -1,11 +1,13 @@
 import 'dart:async' show Timer;
 import 'dart:convert' show jsonDecode;
 
+import 'package:PiliPlus/build_config.dart';
 import 'package:PiliPlus/common/constants.dart';
 import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/flutter/popup_menu.dart';
 import 'package:PiliPlus/common/widgets/loading_widget/loading_widget.dart';
 import 'package:PiliPlus/common/widgets/selection_text.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/services/logger.dart';
 import 'package:PiliPlus/utils/date_utils.dart';
 import 'package:PiliPlus/utils/page_utils.dart';
@@ -75,8 +77,12 @@ class _LogsPageState extends State<LogsPage> {
   }
 
   void copyLogs() {
+    final vod = VodProxyLog.exportedText;
     Utils.copyText(
-      '```\n${logsContent.join('\n\n')}```',
+      '```\nbuild=${BuildConfig.buildId}\n'
+      'display=${BuildConfig.displayVersion}\n'
+      '${vod.isEmpty ? '' : '$vod\n\n'}'
+      '${logsContent.join('\n\n')}```',
       needToast: false,
     );
     if (mounted) {
@@ -109,7 +115,7 @@ class _LogsPageState extends State<LogsPage> {
     final padding = MediaQuery.viewPaddingOf(context);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('日志'),
+        title: Text('日志 · ${BuildConfig.buildId}'),
         actions: [
           StaticPopupMenuButton(
             itemBuilder: (_) => [

@@ -39,10 +39,13 @@ import 'package:PiliPlus/pages/video/introduction/local/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/view.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/widgets/intro_detail.dart';
+import 'package:PiliPlus/pages/video/introduction/pgc/widgets/season.dart'
+    as pgc;
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/view.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/widgets/page.dart';
-import 'package:PiliPlus/pages/video/introduction/ugc/widgets/season.dart';
+import 'package:PiliPlus/pages/video/introduction/ugc/widgets/season.dart'
+    as ugc;
 import 'package:PiliPlus/pages/video/member/controller.dart';
 import 'package:PiliPlus/pages/video/member/view.dart';
 import 'package:PiliPlus/pages/video/related/view.dart';
@@ -87,7 +90,6 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:get/get.dart';
-import 'package:material_ui/material_ui.dart';
 import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
 
 class VideoDetailPageV extends StatefulWidget {
@@ -111,6 +113,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   // 标志位：_onPopInvokedWithResult 触发了 didPop=true 但 PiP 被其他视频/直播抢占，
   // 需要在 didPopNext 关闭其他 PiP 后重试启动
   bool _pipRetryPending = false;
+
+  // 标志位：三点菜单「应用内画中画」发起的 pop，一次性；由 _onPopInvokedWithResult 消费，
+  // 让本次收起绕过设置开关与嵌套栈判断
+  bool _manualPipRequested = false;
 
   // 从 PiP 恢复时提前取出的 additional controllers（在 stopPip 清空前保存）
   dynamic _savedIntroControllerFromPip;
@@ -158,16 +164,29 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   bool get isFullScreen =>
       videoDetailController.plPlayerController.isFullScreen.value;
 
+  // 本页能否被 pop 收起：popScope 的 canPop 与手动小窗入口共用同一判定
+  bool get _canPopPage =>
+      videoDetailController.canPopPage(isPortrait: isPortrait);
+
+  /// 本页是否持有 controller 级 GlobalKey 的挂载权（见 VideoDetailController.pageOwner）
+  bool get _isPageOwner => identical(videoDetailController.pageOwner, this);
+
+  /// 非 owner 页面不挂 controller 级 GlobalKey：同一 controller 被两个驻栈页面
+  /// 共用时（同视频复用 / fromPip 展开），离屏旧页每次重建都会把 element 抢回去，
+  /// 可见页就只剩黑底；不挂 key 的副本只是一份不可见的普通子树
+  GlobalKey<T>? _ownedKey<T extends State<StatefulWidget>>(GlobalKey<T> key) =>
+      _isPageOwner ? key : null;
+
   bool get _shouldShowSeasonPanel {
     if (videoDetailController.isFileSource ||
         isPortrait ||
-        !videoDetailController.isUgc) {
+        !videoDetailController.plPlayerController.horizontalSeasonPanel) {
       return false;
     }
-    late final videoDetail = ugcIntroController.videoDetail.value;
-    return videoDetailController.plPlayerController.horizontalSeasonPanel &&
-        (videoDetail.ugcSeason != null ||
-            ((videoDetail.pages?.length ?? 0) > 1));
+    if (videoDetailController.isUgc) {
+      return ugcIntroController.videoDetail.value.hasSeasonOrParts;
+    }
+    return pgcIntroController.pgcItem.hasEpisodes;
   }
 
   void _resetEnteringPipFlags() {
@@ -466,10 +485,20 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       }
     }
 
+    // introController 是惰性字段（见字段声明），必须在三条赋值路径
+    // 汇合之后才能求值 runtimeType
+    _setPlayCallBack();
+
     // AI chat controller - create if not already registered (PiP reuse)
     if (!Get.isRegistered<AiChatController>(tag: heroTag)) {
       Get.put(AiChatController(heroTag: heroTag), tag: heroTag);
     }
+
+    // 必须在 videoDetailController 三条赋值路径（恢复/新建）汇合之后绑定
+    videoDetailController.onRequestInAppPip = _enterInAppPipManually;
+    // 认领 controller 级 GlobalKey 的挂载权。复用路径下旧页仍驻栈，
+    // 其后的重建不再挂这些 key（见 _ownedKey / plPlayer）
+    videoDetailController.pageOwner = this;
 
     if (restoringFromPip) {
       plPlayerController = videoDetailController.plPlayerController;
@@ -517,6 +546,11 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         if (!mounted) return;
 
         _logSponsorBlock('First postFrameCallback executing');
+
+        // 复用时随 childKey 一起接管了旧页的 MiniScaffoldState，其中可能还开着
+        // 旧页的侧栏 sheet（LocalHistoryEntry 挂在旧页路由上，本页返回键关不掉），
+        // 这里主动关掉；旧页路由仍在栈内，移除 entry 是安全的
+        videoDetailController.childKey.currentState?.closeBottomSheet();
 
         videoDetailController.videoState.value = true;
         videoDetailController.videoState.refresh();
@@ -615,6 +649,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       return;
     }
     videoDetailController.playedTime = position;
+    videoDetailController.danmakuMaskController.updatePosition(position);
   }
 
   @override
@@ -632,7 +667,17 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     } else if (state == .paused) {
       introController.cancelTimer();
       ctr.showDanmaku = false;
+      ctr.flushProxySessionOnBackground();
+    } else if (state == .detached) {
+      ctr.flushProxySessionOnBackground(reason: 'detach');
     }
+  }
+
+  void _setPlayCallBack() {
+    PlPlayerController.setPlayCallBack(
+      playCallBack,
+      playOwner: (tag: heroTag, type: introController.runtimeType),
+    );
   }
 
   Future<void>? playCallBack() {
@@ -773,6 +818,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   @override
   void dispose() {
     VideoStackManager.decrement(); // 减少视频页面层级追踪
+    // 仍是 owner 才释放；被下层页面在 didPopNext 收回后这里不能再清
+    if (identical(videoDetailController.pageOwner, this)) {
+      videoDetailController.pageOwner = null;
+    }
     final isInAppPip = PipOverlayService.isInPipMode;
     // 如果 _pipRetryPending=true 但用户没有继续 pop（_onPopInvokedWithResult 未触发），
     // 说明用户通过其他方式离开（点导航栏、Get.offAll 等），需要主动暂停播放器。
@@ -784,6 +833,11 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     plPlayerController
       ?..removeStatusLister(playerListener)
       ..removePositionListener(positionListener);
+
+    // 从小窗展开的新页面会复用同一 controller 并重新绑定，只解绑指向本页的引用
+    if (videoDetailController.onRequestInAppPip == _enterInAppPipManually) {
+      videoDetailController.onRequestInAppPip = null;
+    }
 
     Get.delete<HorizontalMemberPageController>(
       tag: videoDetailController.heroTag,
@@ -838,7 +892,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     }
 
     // 2. 计算小窗触发状态
-    final playerStatusBeforePush = plPlayerController?.playerStatus.value;
+    final playerStatusBeforePush = plPlayerController?.playerStatus;
     final bool willStartPip =
         plPlayerController != null &&
         playerStatusBeforePush?.isPlaying == true &&
@@ -894,6 +948,11 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   void didPopNext() async {
     super.didPopNext();
 
+    // 收回 controller 级 GlobalKey 的挂载权：上层（可能复用同一 controller 的）
+    // 视频页正在离开，本页随后的 setState 会重新挂 key 把 element 接回来。
+    // 放在 isCloseAll 早返回之前：认领只是改一个字段，任何路径都不该跳过
+    videoDetailController.pageOwner = this;
+
     if (videoDetailController.plPlayerController.isCloseAll) {
       return;
     }
@@ -923,7 +982,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         // 小窗里的实际状态是用户最新的播放意图（可能在小窗中手动暂停过），
         // 先于关闭小窗记录，交由 didPopNext 末尾统一对账
         videoDetailController.playerStatus =
-            plPlayerController?.playerStatus.value;
+            plPlayerController?.playerStatus;
         // 返回展开：小窗飞回页内播放器位置，非销毁式 stopPip 推迟到握手完成；
         // 无法归位（无小窗会话）则维持旧的瞬时关闭
         if (PipOverlayService.transition.beginRestore()) {
@@ -962,11 +1021,16 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       LivePipOverlayService.stopLivePip(callOnClose: true, immediate: true);
     }
 
+    // 设置页可能改了「智能防挡」开关，回到本页时对齐一次
+    videoDetailController.danmakuMaskController.syncEnabledFromPreference(
+      videoDetailController.plPlayerController.positionInMilliseconds,
+    );
+
     // 如果是从开启新页面方式（Get.toNamed）从小窗手动返回，播放器应已在运行，跳过部分重置逻辑
     final bool fromPip = Get.arguments?['fromPip'] ?? false;
     if (fromPip) {
       isShowing = true;
-      PlPlayerController.setPlayCallBack(playCallBack);
+      _setPlayCallBack();
       introController.startTimer();
 
       // 重新恢复 SponsorBlock
@@ -988,7 +1052,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       return;
     }
 
-    PlPlayerController.setPlayCallBack(playCallBack);
+    _setPlayCallBack();
 
     introController.startTimer();
 
@@ -1169,8 +1233,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           body: ExtendedNestedScrollView(
             onlyOneScrollInBody: true,
             physics: platformClampingPhysics,
-            key: videoDetailController.scrollKey,
-            controller: videoDetailController.scrollCtr,
+            key: _ownedKey(videoDetailController.scrollKey),
+            // 共享 ScrollController 同时挂两个滚动视图会触发单 position 断言，非 owner 不接
+            controller: _isPageOwner ? videoDetailController.scrollCtr : null,
             scrollBehavior: const NoOverscrollIndicator(),
             pinnedHeaderSliverHeightBuilder: () {
               double pinnedHeight = this.isFullScreen || !isPortrait
@@ -1242,7 +1307,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
               ];
             },
             body: MiniScaffold(
-              key: videoDetailController.childKey,
+              key: _ownedKey(videoDetailController.childKey),
               body: Column(
                 children: [
                   buildTabBar(onTap: videoDetailController.animToTop),
@@ -1463,7 +1528,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
             width: introWidth,
             height: maxHeight - padding.top,
             child: MiniScaffold(
-              key: videoDetailController.childKey,
+              key: _ownedKey(videoDetailController.childKey),
               body: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1530,7 +1595,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                   width: introWidth,
                   height: introHeight,
                   child: MiniScaffold(
-                    key: videoDetailController.childKey,
+                    key: _ownedKey(videoDetailController.childKey),
                     body: Column(
                       children: [
                         buildTabBar(showIntro: false),
@@ -1627,7 +1692,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
             width: maxWidth - width - padding.horizontal,
             height: maxHeight - padding.top,
             child: MiniScaffold(
-              key: videoDetailController.childKey,
+              key: _ownedKey(videoDetailController.childKey),
               body: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1732,7 +1797,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
             width: maxWidth - padding.horizontal,
             height: bottomHeight,
             child: MiniScaffold(
-              key: videoDetailController.childKey,
+              key: _ownedKey(videoDetailController.childKey),
               body: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1893,14 +1958,17 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     required double height,
     bool isPipMode = false,
   }) {
+    // 非 owner 页（同一 controller 的另一个驻栈页面正在前台）不构建播放器副本：
+    // 既不能挂 videoPlayerKey/headerCtrKey 去抢 element，也不该为同一播放器
+    // 单例再渲染一份 PLVideoPlayer。build() 的 isPipMode 分支与各布局都经此方法
+    if (!_isPageOwner) {
+      return const SizedBox.shrink();
+    }
     // 小窗内容已轻量化（PipMiniVideoContent），本方法只服务页面副本，
     // videoPlayerKey 不再有共享冲突，同时兼任收起源矩形/归位目标矩形的量取锚点
     final Widget player = popScope(
       key: videoDetailController.videoPlayerKey,
-      canPop:
-          !isFullScreen &&
-          !videoDetailController.plPlayerController.isDesktopPip &&
-          (videoDetailController.horizontalScreen || isPortrait),
+      canPop: _canPopPage,
       onPopInvokedWithResult: _onPopInvokedWithResult,
       child: Obx(
         () =>
@@ -2243,7 +2311,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
             width: MediaQuery.textScalerOf(context).scale(120),
             child: AnimatedList(
               padding: EdgeInsets.zero,
-              key: videoDetailController.listKey,
+              key: _ownedKey(videoDetailController.listKey),
               reverse: true,
               shrinkWrap: true,
               initialItemCount: videoDetailController.listData.length,
@@ -2424,11 +2492,10 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           PgcIntroPage(
             key: videoIntroKey,
             heroTag: heroTag,
-            cid: videoDetailController.cid.value,
             showEpisodes: showEpisodes,
             showIntroDetail: showIntroDetail,
             maxWidth: width ?? maxWidth,
-            isLandscape: !isPortrait,
+            isPortrait: isPortrait,
           ),
         SliverToBoxAdapter(
           child: SizedBox(
@@ -2486,11 +2553,57 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   }
 
   Widget get seasonPanel {
-    final videoDetail = ugcIntroController.videoDetail.value;
+    if (videoDetailController.isUgc) return ugcSeasonPanel;
+    return pgcSeasonPanel;
+  }
+
+  Widget get pgcSeasonPanel {
+    Widget child = Obx(
+      () => EpisodePanel(
+        heroTag: heroTag,
+        enableSlide: false,
+        ugcIntroController: null,
+        type: .pgc,
+        cover: null,
+        list: [pgcIntroController.pgcItem.episodes!],
+        bvid: videoDetailController.bvid,
+        aid: videoDetailController.aid,
+        cid: videoDetailController.cid.value,
+        onChangeEpisode: pgcIntroController.onChangeEpisode,
+        showTitle: false,
+        isSupportReverse: false,
+      ),
+    );
+    if (pgcIntroController.pgcItem.hasSeasons) {
+      child = Column(
+        children: [
+          Padding(
+            padding: const .only(left: 12, top: 8, right: 12),
+            child: Builder(
+              builder: (context) {
+                return pgc.SeasonPanel(
+                  seasons: pgcIntroController.pgcItem.seasons!,
+                  pgcController: pgcIntroController,
+                  onSeasonChanged: () {
+                    if (context.mounted) (context as Element).markNeedsBuild();
+                  },
+                );
+              },
+            ),
+          ),
+          Expanded(child: child),
+        ],
+      );
+    }
+    return KeepAliveWrapper(child: child);
+  }
+
+  Widget get ugcSeasonPanel {
+    final videoDetail = ugcIntroController.videoDetail.rawValue;
     return KeepAliveWrapper(
       child: Column(
         children: [
-          if ((videoDetail.pages?.length ?? 0) > 1)
+          if (videoDetail.hasParts)
             if (videoDetail.ugcSeason != null)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -2508,10 +2621,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                     key: seasonEpisodeKey,
                     heroTag: heroTag,
                     enableSlide: false,
-                    ugcIntroController: videoDetailController.isUgc
-                        ? ugcIntroController
-                        : null,
-                    type: EpisodeType.part,
+                    ugcIntroController: ugcIntroController,
+                    type: .part,
                     list: [videoDetail.pages!],
                     cover: videoDetailController.cover.value,
                     bvid: videoDetailController.bvid,
@@ -2522,13 +2633,13 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                         ? ugcIntroController.onChangeEpisode
                         : pgcIntroController.onChangeEpisode,
                     showTitle: false,
-                    isSupportReverse: videoDetailController.isUgc,
+                    isSupportReverse: true,
                     onReverse: () => onReversePlay(isSeason: false),
                   ),
                 ),
               ),
           if (videoDetail.ugcSeason != null) ...[
-            if ((videoDetail.pages?.length ?? 0) > 1) ...[
+            if (videoDetail.hasParts) ...[
               const SizedBox(height: 8),
               Divider(
                 height: 1,
@@ -2538,7 +2649,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Obx(
-                () => SeasonPanel(
+                () => ugc.SeasonPanel(
                   key: ValueKey(introController.videoDetail.value),
                   heroTag: heroTag,
                   canTap: false,
@@ -2553,10 +2664,8 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                   key: seasonEpisodeKey,
                   heroTag: heroTag,
                   enableSlide: false,
-                  ugcIntroController: videoDetailController.isUgc
-                      ? ugcIntroController
-                      : null,
-                  type: EpisodeType.season,
+                  ugcIntroController: ugcIntroController,
+                  type: .season,
                   initialTabIndex: videoDetailController.seasonIndex.value,
                   cover: videoDetailController.cover.value,
                   seasonId: videoDetail.ugcSeason!.id,
@@ -2574,7 +2683,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
                       ? ugcIntroController.onChangeEpisode
                       : pgcIntroController.onChangeEpisode,
                   showTitle: false,
-                  isSupportReverse: videoDetailController.isUgc,
+                  isSupportReverse: true,
                   onReverse: () => onReversePlay(isSeason: true),
                 ),
               ),
@@ -2819,7 +2928,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       plPlayerController?.disableAutoEnterPip();
     }
     if (didPop) {
-      _startInAppPipIfNeeded(fromPop: true);
+      final manual = _manualPipRequested;
+      _manualPipRequested = false;
+      _startInAppPipIfNeeded(fromPop: true, manual: manual);
       // 消费 didPopNext else 分支设的重试标志（用户真的继续 pop 了）。
       // 立即调用通常足够（didPopNext 已同步关闭其他 PiP，playerInit 多半已完成）；
       // 若立即失败（rapid back press 时 playerInit 还在 await，playerStatus 不是 playing），
@@ -2833,6 +2944,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           });
         }
       }
+    } else {
+      // pop 被拦下，手动小窗的一次性豁免不能留给下一次普通返回
+      _manualPipRequested = false;
     }
     videoDetailController.plPlayerController.onPopInvokedWithResult(
       didPop,
@@ -2849,11 +2963,14 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         previousRoute.startsWith('/video');
   }
 
-  bool _shouldStartInAppPip({bool fromPop = false}) {
+  /// [manual] 为三点菜单手动触发：不受设置开关约束；嵌套的视频/直播页在
+  /// 触发前已被静默移除，且 didRemove 会把 Get.previousRoute 改写成被移除页
+  /// 的名字，栈判断在此路径下既无必要也不可信
+  bool _shouldStartInAppPip({bool fromPop = false, bool manual = false}) {
     _logSponsorBlock(
-      'Checking PiP: count=${VideoStackManager.getCount()}, previousRoute=${Get.previousRoute}',
+      'Checking PiP: count=${VideoStackManager.getCount()}, previousRoute=${Get.previousRoute}, manual=$manual',
     );
-    if (!Pref.enableInAppPip) {
+    if (!manual && !Pref.enableInAppPip) {
       _logSponsorBlock('Reject PiP: in-app PiP is disabled in settings');
       return false;
     }
@@ -2873,7 +2990,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       );
       return false;
     }
-    if (controller.playerStatus.value != PlayerStatus.playing) {
+    if (controller.playerStatus != PlayerStatus.playing) {
       _logSponsorBlock('Reject PiP: video is paused');
       return false;
     }
@@ -2888,7 +3005,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
       return false;
     }
     final prevRoute = Get.previousRoute;
-    if (VideoStackManager.isReturningToVideo()) {
+    if (!manual && VideoStackManager.isReturningToVideo()) {
       // 如果返回的页面不是视频或直播详情页，允许开启小窗
       if (!prevRoute.startsWith('/video') &&
           !prevRoute.startsWith('/liveRoom')) {
@@ -2905,8 +3022,59 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
     return true;
   }
 
-  void _startInAppPipIfNeeded({bool fromPop = false}) {
-    if (!_shouldStartInAppPip(fromPop: fromPop)) {
+  /// 三点菜单「应用内画中画」：不依赖设置开关，把当前视频临时收进小窗。
+  /// 复用返回键收起路径（pop → _onPopInvokedWithResult → _startInAppPipIfNeeded），
+  /// 只是提前把门禁条件凑齐：全屏的先退全屏、暂停的先续播、嵌套页先静默移除
+  Future<void> _enterInAppPipManually() async {
+    if (!mounted || _isEnteringPipMode || _manualPipRequested) {
+      return;
+    }
+    plPlayerController ??= videoDetailController.plPlayerController;
+    final controller = plPlayerController!;
+    if (controller.isFullScreen.value) {
+      // 全屏时返回键语义是"退出全屏"，页面本就不能被 pop；且直接 pop 会把
+      // 播放器单例的 isFullScreen 留在 true、方向也不复位（resetScreenRotation
+      // 只在 triggerFullScreen 内调用）。先退回半屏再走正常的收起流程
+      await controller.triggerFullScreen(status: false);
+      if (!mounted) {
+        return;
+      }
+      // 横屏退出全屏会把设备转回竖屏，由 OS 异步完成；isPortrait 是 _canPopPage
+      // 的一项，未等到就判定会被误拒。这里直接用待判定的条件本身当落定信号：
+      // 竖屏视频退出全屏不转屏，isPortrait 已为 true，只等保底的一帧；
+      // 方向本就未变时（如 fullScreenMode=.none 的横屏手机）等不到，超时后
+      // 由下面的判定拒绝——这种形态本就不该 pop 本页
+      await PipOverlayService.awaitLayoutSettled(() => _canPopPage);
+      if (!mounted) {
+        return;
+      }
+    }
+    if (controller.videoController != null &&
+        !controller.playerStatus.isPlaying) {
+      // 手动进小窗是明确的播放意图；播完的从头播
+      await controller.play(repeat: controller.playerStatus.isCompleted);
+      if (!mounted) {
+        return;
+      }
+    }
+    if (!_canPopPage || !_shouldStartInAppPip(manual: true)) {
+      SmartDialog.showToast('当前无法进入小窗');
+      return;
+    }
+    if (PipOverlayService.removeNestedVideoLikeRoutesBelow(context) > 0) {
+      // 被移除的页面要到下一帧才卸载并归还各自的播放器计数；等它们落地再 pop，
+      // 否则小窗按 X 关闭时计数未归零、播放器不会真正销毁
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) {
+        return;
+      }
+    }
+    _manualPipRequested = true;
+    Get.back();
+  }
+
+  void _startInAppPipIfNeeded({bool fromPop = false, bool manual = false}) {
+    if (!_shouldStartInAppPip(fromPop: fromPop, manual: manual)) {
       return;
     }
 
@@ -3073,6 +3241,7 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   void onShowMemberPage(int? mid) {
     videoDetailController.childKey.currentState?.showBottomSheet(
       constraints: const BoxConstraints(),
+      dragHeight: 100,
       (context) {
         return HorizontalMemberPage(
           mid: mid,

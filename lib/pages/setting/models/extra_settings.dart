@@ -1,8 +1,9 @@
-import 'dart:io' show Platform;
+import 'dart:io' show Platform, Directory;
 import 'dart:math' show max;
 
 import 'package:PiliPlus/common/widgets/custom_icon.dart';
 import 'package:PiliPlus/common/widgets/dialog/simple_dialog_option.dart';
+import 'package:PiliPlus/common/widgets/emote_tooltip.dart';
 import 'package:PiliPlus/common/widgets/flutter/refresh_indicator.dart'
     show RefreshIndicator, displacement, refreshDragExtent;
 import 'package:PiliPlus/common/widgets/gesture/horizontal_drag_gesture_recognizer.dart'
@@ -33,7 +34,7 @@ import 'package:PiliPlus/pages/video/reply/widgets/reply_item_grpc.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
-import 'package:PiliPlus/utils/cache_manager.dart';
+import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/feed_back.dart';
 import 'package:PiliPlus/utils/filtering_text.dart';
@@ -62,11 +63,7 @@ List<SettingsModel> get extraSettings => [
       leading: const Icon(Icons.exit_to_app),
       setKey: SettingBoxKey.minimizeOnExit,
       defaultVal: true,
-      onChanged: (value) {
-        try {
-          Get.find<MainController>().minimizeOnExit = value;
-        } catch (_) {}
-      },
+      onChanged: (value) => WindowController.instance.minimizeOnExit = value,
     ),
     NormalModel(
       title: '缓存路径',
@@ -366,6 +363,13 @@ List<SettingsModel> get extraSettings => [
     onChanged: (value) => PendantAvatar.showDecorate = value,
   ),
   SwitchModel(
+    title: '点击表情显示 Tooltip',
+    leading: const Icon(Icons.emoji_emotions_outlined),
+    setKey: SettingBoxKey.enableEmoteTooltip,
+    defaultVal: false,
+    onChanged: (value) => enableEmoteTooltip = value,
+  ),
+  SwitchModel(
     title: '显示粉丝勋章',
     leading: const Icon(MdiIcons.medalOutline),
     setKey: SettingBoxKey.showMedal,
@@ -651,8 +655,7 @@ List<SettingsModel> get extraSettings => [
   ),
   NormalModel(
     title: '最大缓存大小',
-    getSubtitle: () =>
-        '当前最大缓存大小: 「${CacheManager.formatSize(Pref.maxCacheSize)}」',
+    getSubtitle: () => '当前最大缓存大小: 「${Pref.maxCacheSize.formatSize}」',
     leading: const Icon(Icons.delete_outlined),
     onTap: _showCacheDialog,
   ),
@@ -780,6 +783,13 @@ void _showDownPathDialog(BuildContext context, VoidCallback setState) {
         DialogOption(
           onPressed: () {
             Get.back();
+            PathUtils.openDir(downloadPath);
+          },
+          child: const Text('打开'),
+        ),
+        DialogOption(
+          onPressed: () {
+            Get.back();
             Utils.copyText(downloadPath);
           },
           child: const Text('复制', style: TextStyle(fontSize: 14)),
@@ -799,7 +809,11 @@ void _showDownPathDialog(BuildContext context, VoidCallback setState) {
         DialogOption(
           onPressed: () async {
             Get.back();
-            final path = await FilePicker.getDirectoryPath();
+            final path = await FilePicker.getDirectoryPath(
+              initialDirectory: Directory(downloadPath).existsSync()
+                  ? downloadPath
+                  : null,
+            );
             if (path == null || path == downloadPath) return;
             downloadPath = path;
             setState();
@@ -1232,6 +1246,7 @@ void _showCacheDialog(BuildContext context, VoidCallback setState) {
     builder: (context) => AlertDialog(
       title: const Text('最大缓存大小'),
       content: TextField(
+        maxLength: 6,
         autofocus: true,
         onChanged: (value) => valueStr = value,
         keyboardType: TextInputType.number,

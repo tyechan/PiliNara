@@ -18,6 +18,19 @@ subprojects {
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 }
 
+// AGP 9 + android.builtInKotlin=false: plugins that only apply Kotlin when
+// AGP < 9 (e.g. audio_session git `dev`) otherwise ship uncompiled .kt and
+// break GeneratedPluginRegistrant.
+subprojects {
+    pluginManager.withPlugin("com.android.library") {
+        if (file("src/main/kotlin").exists() &&
+            !pluginManager.hasPlugin("org.jetbrains.kotlin.android")
+        ) {
+            pluginManager.apply("org.jetbrains.kotlin.android")
+        }
+    }
+}
+
 subprojects {
     afterEvaluate {
         if (project.extensions.findByName("android") != null) {

@@ -1,8 +1,8 @@
 abstract final class Constants {
-  static const appName = 'PiliNara';
-  static const sourceCodeUrl = 'https://github.com/Starfallan/PiliNara';
+  static const appName = 'PiliPala';
+  static const sourceCodeUrl = 'https://github.com/tyechan/PiliNara';
+  static const naraCodeUrl = 'https://github.com/Starfallan/PiliNara';
   static const upstreamCodeUrl = 'https://github.com/bggRGjQaUbCoE/PiliPlus';
-    
 
   // 27eb53fc9058f8c3  移动端 Android
   // 4409e2ce8ffd12b8  HD版
@@ -41,6 +41,13 @@ abstract final class Constants {
 
   static const goodsUrlPrefix = "https://gaoneng.bilibili.com/tetris";
 
-  // 'itemOpusStyle,opusBigCover,onlyfansVote,endFooterHidden,decorationCard,onlyfansAssetsV2,ugcDelete,onlyfansQaCard,editable,opusPrivateVisible,avatarAutoTheme,sunflowerStyle,cardsEnhance,eva3CardOpus,eva3CardVideo,eva3CardComment,eva3CardVote,eva3CardUser'
-  static const dynFeatures = 'itemOpusStyle,listOnlyfans,onlyfansQaCard';
+  // static const dynFeatures = 'itemOpusStyle,listOnlyfans,onlyfansQaCard';
+  static const dynFeatures =
+      'itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote,decorationCard,onlyfansAssetsV2,forwardListHidden,ugcDelete,onlyfansQaCard,commentsNewVersion,avatarAutoTheme,sunflowerStyle,cardsEnhance,eva3CardOpus,eva3CardVideo,eva3CardComment,eva3CardVote,eva3CardUser';
+
+  static const dynDetailFeatures =
+      'itemOpusStyle,opusBigCover,onlyfansVote,endFooterHidden,decorationCard,onlyfansAssetsV2,ugcDelete,onlyfansQaCard,editable,opusPrivateVisible,avatarAutoTheme,sunflowerStyle,cardsEnhance,eva3CardOpus,eva3CardVideo,eva3CardComment,eva3CardVote,eva3CardUser';
+
+  static const opusDetailFeatures =
+      'onlyfansVote,onlyfansAssetsV2,onlyfansOpusCard,decorationCard,htmlNewStyle,ugcDelete,editable,opusPrivateVisible,opusTribeeApprovedThread,opusTribeeRejectThread,opusTribeeFeatured,opusTribeeModifyCategory,opusTribeeRemoveThread,opusTribeeCoin,tribeeEdit,avatarAutoTheme,avatarTypeOpus,sunflowerStyle,articleEnhance,cardsEnhance,eva3CardOpus,eva3CardVideo,eva3CardComment,eva3CardVote,eva3CardUser';
 }
