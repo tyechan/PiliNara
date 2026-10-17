@@ -29,8 +29,11 @@ class PlaybackDiag {
   String _audioHost = '-';
   String? _dashCodec;
   void Function(String reason)? onEarlyEnd;
-  DateTime? _lastRecoverAt;
-  int _recoverCount = 0;
+  void Function(String reason)? onRecoverGiveUp;
+  final List<DateTime> _recoverAt = <DateTime>[];
+  bool _earlyEndHint = false;
+  Duration? _lastTimePos;
+  DateTime? _nullSurfaceAt;
 
   void attach(
     Player player, {
@@ -56,8 +59,10 @@ class PlaybackDiag {
     _nalBurst = 0;
     _eofVideo = false;
     _eofAudio = false;
-    _recoverCount = 0;
-    _lastRecoverAt = null;
+    _recoverAt.clear();
+    _earlyEndHint = false;
+    _lastTimePos = null;
+    _nullSurfaceAt = null;
     _ticks = 0;
     _tick = Timer.periodic(const Duration(seconds: 1), (_) {
       _onTick(player);
@@ -106,10 +111,52 @@ class PlaybackDiag {
   static bool freezeAudioMoved({
     required double? audioPts,
     required double? lastAudioPts,
+    double? timePosSec,
+    double? lastTimePosSec,
+    bool earlyEnd = false,
   }) {
-    return audioPts != null &&
+    if (audioPts != null &&
         lastAudioPts != null &&
-        audioPts > lastAudioPts + 0.15;
+        audioPts > lastAudioPts + 0.15) {
+      return true;
+    }
+    if (earlyEnd &&
+        timePosSec != null &&
+        lastTimePosSec != null &&
+        timePosSec > lastTimePosSec + 0.15) {
+      return true;
+    }
+    return false;
+  }
+
+  /// After partial-file / video EOF, missing video-pts still counts as stuck.
+  static bool freezeVideoStuck({
+    required bool videoMoved,
+    required bool earlyEnd,
+    required double? videoPts,
+    required int? frame,
+  }) {
+    if (videoMoved) return false;
+    if (earlyEnd) return true;
+    return videoPts != null || frame != null;
+  }
+
+  static const int recoverMaxPerMinute = 5;
+  static const Duration recoverMinInterval = Duration(seconds: 2);
+
+  static String? recoverDecision({
+    required List<DateTime> attempts,
+    required DateTime now,
+  }) {
+    final recent = attempts
+        .where((t) => now.difference(t) < const Duration(minutes: 1))
+        .length;
+    if (recent >= recoverMaxPerMinute) return 'give-up';
+    if (attempts.isNotEmpty &&
+        now.difference(attempts.last) < recoverMinInterval) {
+      return 'cooldown';
+    }
+    return null;
   }
 
   void onLog(PlayerLog log) {
@@ -128,7 +175,12 @@ class PlaybackDiag {
     }
     if (lower.contains('partial file')) {
       VodProxyLog.play('mpv partial-file ${log.prefix} ${log.text}');
+      _earlyEndHint = true;
       _requestRecover('partial-file');
+      return;
+    }
+    if (text.contains('Both surface and native_window are NULL')) {
+      _nullSurfaceAt = DateTime.now();
       return;
     }
     if (lower.contains('reconnect') || text.contains('ffurl_read returned')) {
@@ -144,7 +196,12 @@ class PlaybackDiag {
     }
     if (lower.contains('partial file')) {
       VodProxyLog.play('mpv partial-file $event');
+      _earlyEndHint = true;
       _requestRecover('partial-file');
+      return;
+    }
+    if (event.contains('Both surface and native_window are NULL')) {
+      _nullSurfaceAt = DateTime.now();
       return;
     }
     if (event.contains('EOF') || lower.contains('end of file')) {
@@ -154,24 +211,35 @@ class PlaybackDiag {
       } else if (!_eofVideo) {
         _eofVideo = true;
         VodProxyLog.play('mpv eof video');
+        _earlyEndHint = true;
         _requestRecover('video-eof');
       }
     }
   }
 
+  bool get sawNullSurfaceRecently {
+    final at = _nullSurfaceAt;
+    return at != null &&
+        DateTime.now().difference(at) < const Duration(seconds: 30);
+  }
+
   void _requestRecover(String reason) {
     if (_directMode) return;
+    _earlyEndHint = true;
     final now = DateTime.now();
-    if (_recoverCount >= 2) return;
-    if (_lastRecoverAt != null &&
-        now.difference(_lastRecoverAt!) < const Duration(seconds: 8)) {
+    final decision = recoverDecision(attempts: _recoverAt, now: now);
+    if (decision == 'give-up') {
+      VodProxyLog.play('recover-giveup reason=$reason n=${_recoverAt.length}');
+      onRecoverGiveUp?.call(reason);
       return;
     }
-    _recoverCount++;
-    _lastRecoverAt = now;
+    if (decision == 'cooldown') {
+      VodProxyLog.play('recover-skip reason=$reason cooldown');
+      return;
+    }
+    _recoverAt.add(now);
     _eofVideo = false;
-    _videoStuckSince = null;
-    _freezeLogged = false;
+    VodProxyLog.play('recover-try reason=$reason n=${_recoverAt.length}');
     onEarlyEnd?.call(reason);
   }
 
@@ -250,6 +318,7 @@ class PlaybackDiag {
           !_directMode &&
           duration > const Duration(seconds: 2) &&
           timePos + const Duration(seconds: 2) < duration) {
+        _earlyEndHint = true;
         _requestRecover('video-eof');
       }
 
@@ -263,8 +332,19 @@ class PlaybackDiag {
       final audioMoved = freezeAudioMoved(
         audioPts: audioPts,
         lastAudioPts: _lastAudioPts,
+        timePosSec: timePos.inMilliseconds / 1000,
+        lastTimePosSec: _lastTimePos == null
+            ? null
+            : _lastTimePos!.inMilliseconds / 1000,
+        earlyEnd: _earlyEndHint,
       );
-      if (!buffering && !videoMoved && audioMoved) {
+      final videoStuck = freezeVideoStuck(
+        videoMoved: videoMoved,
+        earlyEnd: _earlyEndHint,
+        videoPts: videoPts,
+        frame: frame,
+      );
+      if (!buffering && videoStuck && audioMoved) {
         _videoStuckSince ??= DateTime.now();
         final stuck = DateTime.now().difference(_videoStuckSince!);
         if (!_freezeLogged && stuck >= const Duration(seconds: 3)) {
@@ -279,6 +359,7 @@ class PlaybackDiag {
             'video-pts=${videoPts ?? '-'} audio-pts=${audioPts ?? '-'} '
             'frames=${frame ?? -1} hwdec=${_lastHwdec ?? prop('hwdec-current')} '
             'paused-for-cache=$pausedForCache eof-reached=$eofReached '
+            'early-end=$_earlyEndHint '
             'demuxer-cache-duration=${prop('demuxer-cache-duration')} '
             'cache-speed=${prop('cache-speed')} seeking=$seeking pause=$paused',
           );
@@ -286,9 +367,11 @@ class PlaybackDiag {
       } else if (videoMoved) {
         _videoStuckSince = null;
         _freezeLogged = false;
+        _earlyEndHint = false;
       }
       _lastVideoPts = videoPts ?? _lastVideoPts;
       _lastAudioPts = audioPts ?? _lastAudioPts;
+      _lastTimePos = timePos;
       if (frame != null) _lastFrame = frame;
     } catch (_) {}
   }

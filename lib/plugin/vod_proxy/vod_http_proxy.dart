@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_host_health.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_session.dart';
@@ -44,6 +45,7 @@ class VodHttpProxy {
 
   Future<void> resetForTest() async {
     VodProxyLog.resetForTest();
+    VodHostHealth.instance.resetForTest();
     closeAll(reason: 'reset-test');
     _seq = 0;
     _forceDirectOnce = false;
@@ -62,7 +64,7 @@ class VodHttpProxy {
   String hostsFor(String kind) {
     for (final session in _sessions.values) {
       if (session.kind != kind) continue;
-      final hosts = session.pool.topHosts(k: 3).map((h) => h.host).join(',');
+      final hosts = session.pool.topHosts(k: 3, kind: session.kind).map((h) => h.host).join(',');
       return hosts.isEmpty ? '-' : hosts;
     }
     return '-';
@@ -163,13 +165,13 @@ class VodHttpProxy {
       }
     }
     final video = _url(videoId);
-    final vHosts = _sessions[videoId]?.pool.topHosts(k: 3).map((h) => h.host).join(',') ?? '-';
+    final vHosts = _sessions[videoId]?.pool.topHosts(k: 3, kind: 'video').map((h) => h.host).join(',') ?? '-';
     final aId = audio != null && audio.startsWith('http://127.0.0.1')
         ? audio.split('/').last
         : null;
     final aHosts = aId == null
         ? '-'
-        : (_sessions[aId]?.pool.topHosts(k: 3).map((h) => h.host).join(',') ?? '-');
+        : (_sessions[aId]?.pool.topHosts(k: 3, kind: 'audio').map((h) => h.host).join(',') ?? '-');
     VodProxyLog.log(
       'wrap video=$video audio=${audio ?? '-'} '
       'srcHost=${Uri.tryParse(source.videoSource)?.host ?? '-'} '
@@ -269,7 +271,7 @@ class VodHttpProxy {
       workers: workers ?? fallbackWorkers(),
       attemptTimeout: attemptTimeout ?? const Duration(seconds: 6),
       fetchBudget: fetchBudget ?? const Duration(seconds: 45),
-      cursorWatchdog: cursorWatchdog ?? const Duration(seconds: 8),
+      cursorWatchdog: cursorWatchdog ?? const Duration(milliseconds: 2500),
     );
     session.onCursorStuck = () => onCursorStuck?.call();
     _sessions[id] = session;

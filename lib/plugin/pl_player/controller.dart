@@ -1244,12 +1244,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // Comma-separated lavf AVOptions. Do NOT put this in Media extras:
       // media_kit splits extras on commas and ffmpeg then sees
       // reconnect=0:http_persistent=0 as one boolean.
-      try {
-        player.setProperty(
-          'stream-lavf-o',
-          'reconnect=0,http_persistent=0',
-        );
-      } catch (_) {}
+      _applyLavfOptions(player, proxy: false);
     }
 
     player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
@@ -1257,6 +1252,35 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _startListeners(player);
 
     return player;
+  }
+
+  static const _proxyLavf =
+      'reconnect=1,reconnect_on_network_error=1,reconnect_streamed=1,'
+      'reconnect_delay_max=8,timeout=60000000,rw_timeout=60000000,'
+      'http_persistent=1';
+  static const _directLavf = 'reconnect=0,http_persistent=0';
+
+  void _applyLavfOptions(Player player, {required bool proxy}) {
+    try {
+      player.setProperty('network-timeout', proxy ? '60' : '5');
+      player.setProperty('stream-lavf-o', proxy ? _proxyLavf : _directLavf);
+    } catch (_) {}
+  }
+
+  void _logLavfOpts(Player player) {
+    String prop(String name) {
+      try {
+        return player.getProperty(name);
+      } catch (_) {
+        return '';
+      }
+    }
+
+    VodProxyLog.play(
+      'lavf-opts network-timeout=${prop('network-timeout')} '
+      'stream-lavf-o=${prop('stream-lavf-o')} '
+      'demuxer-lavf-o=${prop('demuxer-lavf-o')}',
+    );
   }
 
   late final buffer = Pref.initBuffer(_playbackSpeed.value);
@@ -1338,6 +1362,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     assert(!isLive || seekTo == null);
+    _applyLavfOptions(player, proxy: _openedViaProxy);
     await player.open(
       Media(video, start: seekTo, extras: extras.isEmpty ? null : extras),
       play: false,
@@ -1358,9 +1383,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         dashCodec: _dashCodec,
       );
       _diag.onEarlyEnd = _openedViaProxy ? _recoverProxyVideo : null;
+      _diag.onRecoverGiveUp = _openedViaProxy
+          ? (reason) => _scheduleProxyFallback('recover-giveup $reason')
+          : null;
       VodHttpProxy.instance.onCursorStuck = _openedViaProxy
           ? () => _scheduleProxyFallback('cursor-stuck')
           : null;
+      _logLavfOpts(player);
     }
   }
 
@@ -2771,6 +2800,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       case AppLifecycleState.resumed:
         if (Platform.isAndroid && !isLive) {
           VodHttpProxy.instance.resumeStats();
+          if (_diag.sawNullSurfaceRecently) {
+            final player = _videoPlayerController;
+            if (player != null) {
+              VodProxyLog.play('surface-reload after mediacodec NULL');
+              unawaited(player.command(const ['video-reload']));
+            }
+          }
         }
         _cancelAutoAudioOnlyTimer();
         if (_autoAudioState == AutoAudioOnlyState.autoAudioOnly) {
