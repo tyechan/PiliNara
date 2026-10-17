@@ -91,9 +91,17 @@ void main() {
     expect(BuildConfig.displayVersion, contains('2.6.1.1 · 1018'));
     expect(BuildConfig.displayVersion.split('\n'), hasLength(1));
     expect(VodProxyLog.safeTitle('audio2'), '-');
-    expect(VodProxyLog.safeTitle('https://upos-sz-mirrorali.bilivideo.com/a.m4s?deadline=1'), '-');
+    expect(
+      VodProxyLog.safeTitle(
+        'https://upos-sz-mirrorali.bilivideo.com/a.m4s?deadline=1',
+      ),
+      '-',
+    );
     expect(VodProxyLog.safeTitle('真正的标题'), '真正的标题');
-    expect(VodProxyLog.hostOnly('https://upos-sz-mirrorali.bilivideo.com/a.m4s?e=1'), 'upos-sz-mirrorali.bilivideo.com');
+    expect(
+      VodProxyLog.hostOnly('https://upos-sz-mirrorali.bilivideo.com/a.m4s?e=1'),
+      'upos-sz-mirrorali.bilivideo.com',
+    );
     expect(VodProxyLog.hostOnly('http://127.0.0.1:9/video1'), '-');
   });
 

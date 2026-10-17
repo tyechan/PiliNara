@@ -120,7 +120,10 @@ void main() {
     pool.recordSuccess(hw, bytes: 512 * 1024, elapsedMs: 200);
     expect(pool.preferred?.host, 'upos-sz-mirrorhw.bilivideo.com');
     pool.recordFailure(ali, reason: 'TimeoutException');
-    expect(pool.available.map((h) => h.host), contains('upos-sz-mirrorali.bilivideo.com'));
+    expect(
+      pool.available.map((h) => h.host),
+      contains('upos-sz-mirrorali.bilivideo.com'),
+    );
     pool.recordFailure(ali, reason: 'TimeoutException');
     pool.recordFailure(ali, reason: 'TimeoutException');
     expect(
@@ -150,9 +153,18 @@ void main() {
   });
 
   test('overseas hosts are scored lower unless they win the probe', () {
-    expect(VodHostPool.isOverseasHost('upos-hz-mirrorakam.akamaized.net'), isTrue);
-    expect(VodHostPool.isOverseasHost('upos-sz-mirrorcosov.bilivideo.com'), isFalse);
-    expect(VodHostPool.isOverseasHost('upos-sz-mirrorali.bilivideo.com'), isFalse);
+    expect(
+      VodHostPool.isOverseasHost('upos-hz-mirrorakam.akamaized.net'),
+      isTrue,
+    );
+    expect(
+      VodHostPool.isOverseasHost('upos-sz-mirrorcosov.bilivideo.com'),
+      isFalse,
+    );
+    expect(
+      VodHostPool.isOverseasHost('upos-sz-mirrorali.bilivideo.com'),
+      isFalse,
+    );
     const akam = 'https://upos-hz-mirrorakam.akamaized.net/a.m4s';
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
     final pool = VodHostPool([akam, ali], random: Random(1));
@@ -220,7 +232,9 @@ void main() {
       isNot(contains('upos-sz-mirrorali.bilivideo.com')),
     );
     final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
-    banned.blacklistedUntil = DateTime.now().subtract(const Duration(seconds: 1));
+    banned.blacklistedUntil = DateTime.now().subtract(
+      const Duration(seconds: 1),
+    );
     banned.bannedAt = DateTime.now().subtract(const Duration(seconds: 31));
     expect(
       pool.available.map((h) => h.host),
@@ -271,8 +285,9 @@ void main() {
       pool.recordFailure(ali, reason: 'TimeoutException');
     }
     final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
-    banned.blacklistedUntil =
-        DateTime.now().subtract(const Duration(seconds: 1));
+    banned.blacklistedUntil = DateTime.now().subtract(
+      const Duration(seconds: 1),
+    );
     banned.bannedAt = DateTime.now().subtract(const Duration(seconds: 31));
     pool.describe();
     expect(banned.blacklistedUntil, isNull);
@@ -352,8 +367,9 @@ void main() {
       pool.recordFailure(ali, reason: 'TimeoutException');
     }
     final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
-    banned.blacklistedUntil =
-        DateTime.now().subtract(const Duration(seconds: 1));
+    banned.blacklistedUntil = DateTime.now().subtract(
+      const Duration(seconds: 1),
+    );
     banned.bannedAt = DateTime.now().subtract(const Duration(seconds: 2));
     expect(
       pool.available.map((h) => h.host),
@@ -372,7 +388,10 @@ void main() {
     for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
       first.recordFailure(ali, reason: 'TimeoutException');
     }
-    expect(VodHostHealth.instance.isBanned('upos-sz-mirrorali.bilivideo.com'), isTrue);
+    expect(
+      VodHostHealth.instance.isBanned('upos-sz-mirrorali.bilivideo.com'),
+      isTrue,
+    );
     final next = VodHostPool([ali, hw], random: Random(2));
     for (var i = 0; i < 8; i++) {
       expect(
@@ -386,12 +405,67 @@ void main() {
     expect(VodLavf.directNetworkTimeout, '15');
     expect(VodLavf.directStream, contains('timeout=15000000'));
     expect(VodLavf.directStream, contains('rw_timeout=15000000'));
-    expect(VodLavf.directStream, contains('reconnect=0'));
+    expect(VodLavf.directStream, contains('reconnect=1'));
+    expect(VodLavf.directStream, contains('reconnect_on_network_error=1'));
     expect(VodLavf.proxyNetworkTimeout, '60');
     expect(VodLavf.proxyStream, contains('timeout=60000000'));
-    expect(VodSession.defaultBackBuffer(8 * 1024 * 1024), 96 * 1024 * 1024);
-    expect(VodSession.defaultBackBuffer(128 * 1024 * 1024), 128 * 1024 * 1024);
+    expect(VodSession.minBackBufferBytes, 192 * 1024 * 1024);
+    expect(VodSession.defaultBackBuffer(8 * 1024 * 1024), 192 * 1024 * 1024);
+    expect(VodSession.defaultBackBuffer(256 * 1024 * 1024), 256 * 1024 * 1024);
   });
+
+  test(
+    'first-frame-stuck fires when video-pts never leaves the opening frame',
+    () {
+      expect(
+        PlaybackDiag.freezeFirstFrameStuck(
+          videoMoved: false,
+          videoPts: null,
+          lastVideoPts: null,
+          audioMoved: true,
+        ),
+        isTrue,
+      );
+      expect(
+        PlaybackDiag.freezeFirstFrameStuck(
+          videoMoved: false,
+          videoPts: 0.0,
+          lastVideoPts: 0.0,
+          audioMoved: true,
+        ),
+        isTrue,
+      );
+      expect(
+        PlaybackDiag.freezeFirstFrameStuck(
+          videoMoved: true,
+          videoPts: null,
+          lastVideoPts: null,
+          audioMoved: true,
+        ),
+        isFalse,
+      );
+      expect(
+        PlaybackDiag.freezeVideoStuck(
+          videoMoved: false,
+          earlyEnd: false,
+          videoPts: null,
+          frame: null,
+          firstFrame: true,
+        ),
+        isTrue,
+      );
+      expect(
+        PlaybackDiag.freezeAudioMoved(
+          audioPts: null,
+          lastAudioPts: null,
+          timePosSec: 4.0,
+          lastTimePosSec: 1.0,
+          clockFallback: true,
+        ),
+        isTrue,
+      );
+    },
+  );
 
   test('freeze detector fires after partial-file when video-pts is gone', () {
     expect(

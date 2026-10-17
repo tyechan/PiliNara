@@ -81,7 +81,9 @@ class PlaybackDiag {
       VodProxyLog.play('mpv buffering-start');
     } else if (_bufferingSince != null) {
       final dur = DateTime.now().difference(_bufferingSince!).inMilliseconds;
-      VodProxyLog.play('mpv buffering-end dur=${(dur / 1000).toStringAsFixed(2)}s');
+      VodProxyLog.play(
+        'mpv buffering-end dur=${(dur / 1000).toStringAsFixed(2)}s',
+      );
       _bufferingSince = null;
     }
   }
@@ -114,13 +116,14 @@ class PlaybackDiag {
     double? timePosSec,
     double? lastTimePosSec,
     bool earlyEnd = false,
+    bool clockFallback = false,
   }) {
     if (audioPts != null &&
         lastAudioPts != null &&
         audioPts > lastAudioPts + 0.15) {
       return true;
     }
-    if (earlyEnd &&
+    if ((earlyEnd || clockFallback) &&
         timePosSec != null &&
         lastTimePosSec != null &&
         timePosSec > lastTimePosSec + 0.15) {
@@ -135,10 +138,29 @@ class PlaybackDiag {
     required bool earlyEnd,
     required double? videoPts,
     required int? frame,
+    bool firstFrame = false,
   }) {
     if (videoMoved) return false;
-    if (earlyEnd) return true;
+    if (earlyEnd || firstFrame) return true;
     return videoPts != null || frame != null;
+  }
+
+  /// Opening frame never advances while the audio/timer clock does.
+  static bool freezeFirstFrameStuck({
+    required bool videoMoved,
+    required double? videoPts,
+    required double? lastVideoPts,
+    required bool audioMoved,
+  }) {
+    if (videoMoved || !audioMoved) return false;
+    if (videoPts == null) return true;
+    if (lastVideoPts != null &&
+        videoPts <= lastVideoPts + 0.05 &&
+        videoPts < 0.5) {
+      return true;
+    }
+    if (lastVideoPts == null && videoPts < 0.15) return true;
+    return false;
   }
 
   static const int recoverMaxPerMinute = 5;
@@ -224,7 +246,6 @@ class PlaybackDiag {
   }
 
   void _requestRecover(String reason) {
-    if (_directMode) return;
     _earlyEndHint = true;
     final now = DateTime.now();
     final decision = recoverDecision(attempts: _recoverAt, now: now);
@@ -245,7 +266,8 @@ class PlaybackDiag {
 
   void _noteNal() {
     _nalWindowStart ??= DateTime.now();
-    if (DateTime.now().difference(_nalWindowStart!) > const Duration(seconds: 5)) {
+    if (DateTime.now().difference(_nalWindowStart!) >
+        const Duration(seconds: 5)) {
       if (_nalBurst > 0) {
         VodProxyLog.play(
           'mpv decoder-error Invalid NAL unit size n=$_nalBurst / 5s',
@@ -315,14 +337,14 @@ class PlaybackDiag {
       final duration = player.state.duration;
 
       if (eofReached == 'yes' &&
-          !_directMode &&
           duration > const Duration(seconds: 2) &&
           timePos + const Duration(seconds: 2) < duration) {
         _earlyEndHint = true;
         _requestRecover('video-eof');
       }
 
-      final buffering = pausedForCache == 'yes' || paused == 'yes' || seeking == 'yes';
+      final buffering =
+          pausedForCache == 'yes' || paused == 'yes' || seeking == 'yes';
       final videoMoved = freezeVideoMoved(
         frame: frame,
         lastFrame: _lastFrame,
@@ -337,12 +359,20 @@ class PlaybackDiag {
             ? null
             : _lastTimePos!.inMilliseconds / 1000,
         earlyEnd: _earlyEndHint,
+        clockFallback: !videoMoved,
+      );
+      final firstFrameStuck = freezeFirstFrameStuck(
+        videoMoved: videoMoved,
+        videoPts: videoPts,
+        lastVideoPts: _lastVideoPts,
+        audioMoved: audioMoved,
       );
       final videoStuck = freezeVideoStuck(
         videoMoved: videoMoved,
         earlyEnd: _earlyEndHint,
         videoPts: videoPts,
         frame: frame,
+        firstFrame: firstFrameStuck,
       );
       if (!buffering && videoStuck && audioMoved) {
         _videoStuckSince ??= DateTime.now();
@@ -359,9 +389,12 @@ class PlaybackDiag {
             'video-pts=${videoPts ?? '-'} audio-pts=${audioPts ?? '-'} '
             'frames=${frame ?? -1} hwdec=${_lastHwdec ?? prop('hwdec-current')} '
             'paused-for-cache=$pausedForCache eof-reached=$eofReached '
-            'early-end=$_earlyEndHint '
+            'early-end=$_earlyEndHint first-frame=$firstFrameStuck '
             'demuxer-cache-duration=${prop('demuxer-cache-duration')} '
             'cache-speed=${prop('cache-speed')} seeking=$seeking pause=$paused',
+          );
+          _requestRecover(
+            firstFrameStuck ? 'first-frame-stuck' : 'video-stuck',
           );
         }
       } else if (videoMoved) {
