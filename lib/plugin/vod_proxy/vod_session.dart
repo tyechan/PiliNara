@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:PiliPlus/http/browser_ua.dart';
 import 'package:PiliPlus/http/constants.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_host_health.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
@@ -29,7 +30,7 @@ class VodSession {
     required this.workers,
     this.attemptTimeout = const Duration(seconds: 6),
     this.fetchBudget = const Duration(seconds: 45),
-    this.cursorWatchdog = const Duration(seconds: 8),
+    this.cursorWatchdog = const Duration(milliseconds: 2500),
   }) : pool = VodHostPool(candidates) {
     pool.onBan = (host) => _kickFetches(fromHost: host);
   }
@@ -198,11 +199,26 @@ class VodSession {
             probe: true,
           ).timeout(const Duration(seconds: 3));
           fileSize ??= result.total;
+          final thruMbps = stat.emaBps * 8 / 1e6;
+          if (kind == 'video') {
+            VodHostHealth.instance.noteVideoProbe(
+              stat.host,
+              ttfbMs: stat.avgTtfbMs,
+              thruMbps: thruMbps,
+            );
+          }
           VodProxyLog.log(
             'probe id=$id host=${stat.host} ttfb=${stat.avgTtfbMs.toStringAsFixed(0)}ms '
-            'thru=${(stat.emaBps * 8 / 1e6).toStringAsFixed(2)}Mbps status=ok',
+            'thru=${thruMbps.toStringAsFixed(2)}Mbps status=ok',
           );
         } catch (e) {
+          if (e is _Forbidden) {
+            pool.dropQuiet(stat.url, reason: '403');
+            VodProxyLog.log(
+              'probe id=$id host=${stat.host} status=skip reason=403',
+            );
+            return;
+          }
           pool.recordFailure(stat.url, reason: 'probe $e', probe: true);
           VodProxyLog.log(
             'probe id=$id host=${stat.host} status=fail reason=$e',
@@ -212,7 +228,7 @@ class VodSession {
     );
     if (_closed) return;
     pool.markOverseasWinnerIfNeeded();
-    final ranked = pool.topHosts(k: 6);
+    final ranked = pool.topHosts(k: 6, kind: kind);
     VodProxyLog.log(
       'rank id=$id overseasWins=${pool.overseasWins} '
       'hosts=${ranked.map((h) => '${h.host}:${(h.emaBps * 8 / 1e6).toStringAsFixed(1)}').join(",")}',
@@ -358,18 +374,21 @@ class VodSession {
       final waited = DateTime.now().difference(started);
       if (!raced && waited >= cursorWatchdog) {
         raced = true;
+        final avoid = _inflightHost[idx];
         VodProxyLog.log(
           'watchdog id=$id idx=$idx range=$range '
-          'reason=no-progress ${cursorWatchdog.inSeconds}s race',
+          'reason=no-progress ${cursorWatchdog.inMilliseconds}ms race',
         );
-        unawaited(_raceChunk(idx, avoidHost: _inflightHost[idx]));
+        unawaited(_raceChunk(idx, avoidHost: avoid));
+        unawaited(_raceChunk(idx + 1, avoidHost: avoid));
       } else if (raced &&
           !stuckSignaled &&
-          waited >= cursorWatchdog + cursorWatchdog) {
+          waited >= const Duration(seconds: 15)) {
         stuckSignaled = true;
-        VodProxyLog.log('abort id=$id range=$range reason=cursor-watchdog');
+        VodProxyLog.log(
+          'abort id=$id range=$range reason=cursor-watchdog — holding client',
+        );
         onCursorStuck?.call();
-        throw VodServeAbort(range, 'cursor-watchdog');
       }
     }
     throw const _SessionClosed();
@@ -451,6 +470,7 @@ class VodSession {
       String? url = pool.pickUrl(
         avoidHost: lastHost,
         allowBanned: allowBanned,
+        kind: kind,
       );
       if (url == null || url.isEmpty) {
         final primary = pool.primaryUrl;
@@ -466,18 +486,13 @@ class VodSession {
       }
       lastHost = Uri.tryParse(url)?.host;
       if (lastHost != null) _inflightHost[idx] = lastHost;
-      final perTry = remaining < attemptTimeout ? remaining : attemptTimeout;
+      final cap = urgent ? const Duration(seconds: 3) : attemptTimeout;
+      final perTry = remaining < cap ? remaining : cap;
       try {
         final result = await _getOrKick(url, range, perTry);
         if (result.bytes.length != range.length) {
           retries++;
-          final banned = pool.recordFailure(url, reason: 'short-read');
-          VodProxyLog.log(
-            'retry id=$id range=$range from=$lastHost reason=short-read '
-            'got=${result.bytes.length} want=${range.length}',
-          );
-          lastError = StateError('short-read');
-          if (banned) _kickFetches(fromHost: lastHost);
+          lastError = _noteFetchFail(url, range, 'short-read');
           continue;
         }
         return result;
@@ -490,32 +505,44 @@ class VodSession {
         continue;
       } on _Forbidden {
         retries++;
-        final banned = pool.recordFailure(
+        lastError = _noteFetchFail(
           url,
-          reason: '403',
+          range,
+          '403',
           ban: const Duration(seconds: 45),
         );
-        VodProxyLog.log(
-          'retry id=$id range=$range from=$lastHost reason=403',
-        );
-        lastError = _Forbidden();
-        if (banned) _kickFetches(fromHost: lastHost);
       } on _SessionClosed {
         rethrow;
       } catch (e) {
         if (_closed) throw const _SessionClosed();
         retries++;
-        final banned = pool.recordFailure(url, reason: e.toString());
-        VodProxyLog.log(
-          'retry id=$id range=$range from=$lastHost reason=$e',
-        );
-        lastError = e;
-        if (banned) _kickFetches(fromHost: lastHost);
+        lastError = _noteFetchFail(url, range, e);
       }
     }
     final why = lastError ?? 'deadline ${fetchBudget.inSeconds}s n=$attempt';
     VodProxyLog.log('abort id=$id range=$range reason=$why');
     throw VodServeAbort(range, why);
+  }
+
+  Object _noteFetchFail(
+    String url,
+    ByteRange range,
+    Object reason, {
+    Duration ban = VodHostPool.defaultBan,
+  }) {
+    final host = Uri.tryParse(url)?.host ?? url;
+    if (pool.isUrlBanned(url) || VodHostHealth.instance.isBanned(host)) {
+      VodProxyLog.log(
+        'stale id=$id range=$range from=$host reason=already-banned $reason',
+      );
+      return reason;
+    }
+    final banned = pool.recordFailure(url, reason: reason.toString(), ban: ban);
+    VodProxyLog.log(
+      'retry id=$id range=$range from=$host reason=$reason',
+    );
+    if (banned) _kickFetches(fromHost: host);
+    return reason;
   }
 
   Future<({Uint8List bytes, int total})> _getOrKick(
@@ -643,7 +670,9 @@ class VodSession {
 
   void _evict() {
     if (_chunks.isEmpty) return;
-    final keepFrom = (_cursor - chunkSize * 2).clamp(0, 1 << 30);
+    final size = fileSize;
+    if (size != null && size <= windowBytes) return;
+    final keepFrom = (_cursor - 8 * 1024 * 1024).clamp(0, 1 << 30);
     final keepTo = _cursor + windowBytes;
     _chunks.removeWhere((idx, _) {
       final start = idx * chunkSize;

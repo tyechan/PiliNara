@@ -17,6 +17,8 @@ class _MockCdn {
     this.timeoutFor = const Duration(seconds: 2),
     this.hangEveryMatching = false,
     this.hangAfterStart = false,
+    this.slowAt,
+    this.slowFor = const Duration(seconds: 7),
     this.advertiseHost = '127.0.0.1',
   });
 
@@ -27,6 +29,8 @@ class _MockCdn {
   final Duration timeoutFor;
   final bool hangEveryMatching;
   final bool hangAfterStart;
+  final int? slowAt;
+  final Duration slowFor;
   final String advertiseHost;
   HttpServer? _server;
   int resets = 0;
@@ -83,6 +87,9 @@ class _MockCdn {
           (await response.detachSocket()).destroy();
           return;
         }
+        if (slowAt != null && start == slowAt) {
+          await Future<void>.delayed(slowFor);
+        }
         var sent = 0;
         const step = 8 * 1024;
         var offset = start;
@@ -116,13 +123,16 @@ class _MockCdn {
   }
 }
 
-Future<Uint8List> _fetchAll(String url) async {
+Future<Uint8List> _fetchAll(
+  String url, {
+  Duration timeout = const Duration(seconds: 15),
+}) async {
   final client = HttpClient();
   try {
     final req = await client.getUrl(Uri.parse(url));
-    final resp = await req.close().timeout(const Duration(seconds: 15));
+    final resp = await req.close().timeout(timeout);
     final builder = BytesBuilder(copy: false);
-    await for (final chunk in resp.timeout(const Duration(seconds: 15))) {
+    await for (final chunk in resp.timeout(timeout)) {
       builder.add(chunk);
     }
     return builder.takeBytes();
@@ -203,6 +213,39 @@ void main() {
       isEmpty,
     );
   }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('slow chunk longer than the old ffmpeg timeout still delivers the full file', () async {
+    final cdn = _MockCdn(
+      payload,
+      slowAt: 32 * 1024,
+      slowFor: const Duration(seconds: 7),
+    );
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      windowBytes: 64 * 1024,
+      workers: 3,
+      // CDN body is delayed 7s — longer than the old ~5s lavf timeout —
+      // but the proxy must keep the client socket open and finish.
+      attemptTimeout: const Duration(seconds: 12),
+      fetchBudget: const Duration(seconds: 25),
+      cursorWatchdog: const Duration(seconds: 20),
+    );
+    expect(proxyUrl, isNotNull);
+    final sw = Stopwatch()..start();
+    final got = await _fetchAll(
+      proxyUrl!,
+      timeout: const Duration(seconds: 30),
+    ).timeout(const Duration(seconds: 35));
+    expect(got, payload);
+    expect(sw.elapsed, greaterThan(const Duration(seconds: 6)));
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('abort id=')),
+      isEmpty,
+    );
+  }, timeout: const Timeout(Duration(seconds: 45)));
 
   test('banned host is not retried for the cursor chunk; other host serves it', () async {
     final bad = _MockCdn(
