@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' show min;
+import 'dart:math' show max, min;
 import 'dart:typed_data';
 
 import 'package:PiliPlus/http/browser_ua.dart';
@@ -31,9 +31,16 @@ class VodSession {
     this.attemptTimeout = const Duration(seconds: 6),
     this.fetchBudget = const Duration(seconds: 45),
     this.cursorWatchdog = const Duration(milliseconds: 2500),
-  }) : pool = VodHostPool(candidates) {
+    int? backBufferBytes,
+  }) : pool = VodHostPool(candidates),
+       backBufferBytes = backBufferBytes ?? defaultBackBuffer(windowBytes) {
     pool.onBan = (host) => _kickFetches(fromHost: host);
   }
+
+  static const int minBackBufferBytes = 96 * 1024 * 1024;
+
+  static int defaultBackBuffer(int windowBytes) =>
+      windowBytes > minBackBufferBytes ? windowBytes : minBackBufferBytes;
 
   final String id;
   final String kind;
@@ -44,6 +51,7 @@ class VodSession {
   final Duration attemptTimeout;
   final Duration fetchBudget;
   final Duration cursorWatchdog;
+  final int backBufferBytes;
   void Function()? onCursorStuck;
 
   final HttpClient _client = HttpClient()
@@ -58,6 +66,7 @@ class VodSession {
   final Set<int> _servedChunks = {};
   int? fileSize;
   int _cursor = 0;
+  int _highWater = 0;
   int _bytesDelivered = 0;
   int _bytesNet = 0;
   int retries = 0;
@@ -72,10 +81,19 @@ class VodSession {
   Timer? _statsTimer;
   int _readEpoch = 0;
   int _activeReads = 0;
-  Completer<void> _kick = Completer<void>();
+  Completer<void> _wake = Completer<void>();
+  int _kickEpoch = 0;
+  String? _kickedHost;
   final Map<int, String> _inflightHost = {};
+  bool _statsPaused = false;
 
   bool get isClosed => _closed;
+
+  int get bytesNet => _bytesNet;
+
+  bool get statsRunning => _statsTimer != null;
+
+  bool get statsPaused => _statsPaused;
 
   int get uniqueServedBytes {
     var n = 0;
@@ -105,8 +123,9 @@ class VodSession {
   }
 
   void startStats() {
+    if (_closed || _statsPaused) return;
     _statsTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
-      if (_closed) return;
+      if (_closed || _statsPaused) return;
       if (_activeReads == 0 &&
           lastServeAt != null &&
           DateTime.now().difference(lastServeAt!) >
@@ -124,12 +143,39 @@ class VodSession {
     });
   }
 
+  void pauseStats() {
+    _statsPaused = true;
+    _statsTimer?.cancel();
+    _statsTimer = null;
+    if (_pauseLogged) return;
+    _pauseLogged = true;
+    VodProxyLog.log(
+      'session_pause id=$id kind=$kind '
+      'served=${_fmtBytes(uniqueServedBytes)} '
+      'fetched=${_fmtBytes(uniqueFetchedBytes)} '
+      'net=${_fmtBytes(_bytesNet)} delivered=${_fmtBytes(_bytesDelivered)} '
+      'retries=$retries cursor=$_cursor size=${fileSize ?? -1}',
+    );
+  }
+
+  void resumeStats() {
+    _statsPaused = false;
+    _pauseLogged = false;
+    startStats();
+  }
+
+  void _wakeWaiters() {
+    if (!_wake.isCompleted) _wake.complete();
+    _wake = Completer<void>();
+  }
+
   void _kickFetches({String? fromHost}) {
     if (fromHost != null) {
+      _kickedHost = fromHost.toLowerCase();
+      _kickEpoch++;
       VodProxyLog.log('requeue id=$id from=$fromHost');
     }
-    if (!_kick.isCompleted) _kick.complete();
-    _kick = Completer<void>();
+    _wakeWaiters();
   }
 
   int get _aheadBytes {
@@ -245,6 +291,7 @@ class VodSession {
     _activeReads++;
     startStats();
     _cursor = start;
+    if (start > _highWater) _highWater = start;
     _evict();
     unawaited(_prefetch(start));
     try {
@@ -283,10 +330,10 @@ class VodSession {
         yield chunk.sublist(offset, offset + take);
         pos += take;
         _cursor = pos;
+        if (pos > _highWater) _highWater = pos;
         _bytesDelivered += take;
         _servedChunks.add(idx);
         lastServeAt = DateTime.now();
-        _pauseLogged = false;
         _evict();
         unawaited(_prefetch(pos));
       }
@@ -362,7 +409,7 @@ class VodSession {
         await Future.any<void>([
           if (inflight != null) inflight.then<void>((_) {}),
           Future<void>.delayed(slice),
-          _kick.future,
+          _wake.future,
         ]);
       } catch (_) {}
 
@@ -409,7 +456,7 @@ class VodSession {
       if (fetched.bytes.length != want) return;
       _chunks[idx] = fetched.bytes;
       _fetchedChunks.add(idx);
-      _kickFetches();
+      _wakeWaiters();
     } on _SessionClosed {
       // Player moved on.
     } catch (e) {
@@ -495,13 +542,11 @@ class VodSession {
           lastError = _noteFetchFail(url, range, 'short-read');
           continue;
         }
+        _bytesNet += result.bytes.length;
         return result;
       } on _HostKicked {
-        retries++;
         lastError = 'kicked';
-        VodProxyLog.log(
-          'retry id=$id range=$range from=$lastHost reason=kicked',
-        );
+        await Future<void>.delayed(const Duration(milliseconds: 40));
         continue;
       } on _Forbidden {
         retries++;
@@ -550,6 +595,8 @@ class VodSession {
     ByteRange range,
     Duration perTry,
   ) {
+    final host = (Uri.tryParse(url)?.host ?? '').toLowerCase();
+    final epochAtStart = _kickEpoch;
     final done = Completer<({Uint8List bytes, int total})>();
     var settled = false;
     void settle(void Function() fn) {
@@ -563,9 +610,18 @@ class VodSession {
       onError: (Object e, StackTrace st) =>
           settle(() => done.completeError(e, st)),
     );
-    _kick.future.then((_) {
-      settle(() => done.completeError(const _HostKicked()));
-    }, onError: (_) {});
+    void watchKick() {
+      _wake.future.then((_) {
+        if (settled) return;
+        if (_kickEpoch != epochAtStart && _kickedHost == host) {
+          settle(() => done.completeError(const _HostKicked()));
+          return;
+        }
+        watchKick();
+      }, onError: (_) {});
+    }
+
+    watchKick();
     return done.future;
   }
 
@@ -591,7 +647,6 @@ class VodSession {
       throw _Forbidden();
     }
     final body = await consolidate(resp);
-    _bytesNet += body.length;
     if (resp.statusCode == 206) {
       final parsed = ContentRangeReply.parse(
         resp.headers.value(HttpHeaders.contentRangeHeader),
@@ -671,10 +726,11 @@ class VodSession {
   void _evict() {
     if (_chunks.isEmpty) return;
     final size = fileSize;
-    if (size != null && size <= windowBytes) return;
-    final keepFrom = (_cursor - 8 * 1024 * 1024).clamp(0, 1 << 30);
-    final keepTo = _cursor + windowBytes;
+    if (size != null && size <= windowBytes + backBufferBytes) return;
+    final keepFrom = (_cursor - backBufferBytes).clamp(0, 1 << 30);
+    final keepTo = max(_cursor + windowBytes, _highWater);
     _chunks.removeWhere((idx, _) {
+      if (_inflight.containsKey(idx)) return false;
       final start = idx * chunkSize;
       return start + chunkSize < keepFrom || start > keepTo;
     });
@@ -689,13 +745,12 @@ class VodSession {
 
   void logSessionEnd({String reason = 'close'}) {
     final pausing = reason == 'pause' || reason == 'detach';
-    if (_endLogged) return;
-    if (pausing && _pauseLogged) return;
     if (pausing) {
-      _pauseLogged = true;
-    } else {
-      _endLogged = true;
+      pauseStats();
+      return;
     }
+    if (_endLogged) return;
+    _endLogged = true;
     _statsTimer?.cancel();
     _statsTimer = null;
     VodProxyLog.log(
@@ -716,7 +771,7 @@ class VodSession {
     _readEpoch++;
     _statsTimer?.cancel();
     _statsTimer = null;
-    _kickFetches();
+    _wakeWaiters();
     logSessionEnd(reason: reason);
     _chunks.clear();
     _inflight.clear();

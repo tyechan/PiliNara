@@ -35,6 +35,7 @@ import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_lavf.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/services/live_pip_overlay_service.dart';
 import 'package:PiliPlus/services/pip_overlay_service.dart';
@@ -1254,16 +1255,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return player;
   }
 
-  static const _proxyLavf =
-      'reconnect=1,reconnect_on_network_error=1,reconnect_streamed=1,'
-      'reconnect_delay_max=8,timeout=60000000,rw_timeout=60000000,'
-      'http_persistent=1';
-  static const _directLavf = 'reconnect=0,http_persistent=0';
-
   void _applyLavfOptions(Player player, {required bool proxy}) {
     try {
-      player.setProperty('network-timeout', proxy ? '60' : '5');
-      player.setProperty('stream-lavf-o', proxy ? _proxyLavf : _directLavf);
+      player.setProperty(
+        'network-timeout',
+        proxy ? VodLavf.proxyNetworkTimeout : VodLavf.directNetworkTimeout,
+      );
+      player.setProperty(
+        'stream-lavf-o',
+        proxy ? VodLavf.proxyStream : VodLavf.directStream,
+      );
     } catch (_) {}
   }
 
