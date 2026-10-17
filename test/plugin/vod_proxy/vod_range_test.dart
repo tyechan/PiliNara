@@ -3,8 +3,10 @@ import 'dart:math';
 import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_health.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_lavf.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_session.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -378,6 +380,17 @@ void main() {
         'upos-sz-mirrorhw.bilivideo.com',
       );
     }
+  });
+
+  test('direct lavf timeout is 15s and proxy stays at 60s', () {
+    expect(VodLavf.directNetworkTimeout, '15');
+    expect(VodLavf.directStream, contains('timeout=15000000'));
+    expect(VodLavf.directStream, contains('rw_timeout=15000000'));
+    expect(VodLavf.directStream, contains('reconnect=0'));
+    expect(VodLavf.proxyNetworkTimeout, '60');
+    expect(VodLavf.proxyStream, contains('timeout=60000000'));
+    expect(VodSession.defaultBackBuffer(8 * 1024 * 1024), 96 * 1024 * 1024);
+    expect(VodSession.defaultBackBuffer(128 * 1024 * 1024), 128 * 1024 * 1024);
   });
 
   test('freeze detector fires after partial-file when video-pts is gone', () {

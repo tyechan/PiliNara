@@ -18,6 +18,9 @@ class VodHttpProxy {
   HttpServer? _server;
   int? port;
   final Map<String, VodSession> _sessions = {};
+  final Map<String, VodSession> _lingering = {};
+  final Map<String, Timer> _lingerTimers = {};
+  static const Duration lingerClosedFor = Duration(seconds: 5);
   int _seq = 0;
   bool _forceDirectOnce = false;
   DateTime? lastRequestAt;
@@ -35,13 +38,45 @@ class VodHttpProxy {
   }
 
   void closeAll({String reason = 'close'}) {
-    if (_sessions.isEmpty) return;
-    VodProxyLog.log('close reason=$reason n=${_sessions.length}');
-    for (final session in _sessions.values) {
-      session.close(reason: reason);
+    final hard = reason == 'reset-test' || reason == 'dispose';
+    if (_sessions.isEmpty && (!hard || _lingering.isEmpty)) return;
+    if (_sessions.isNotEmpty) {
+      VodProxyLog.log('close reason=$reason n=${_sessions.length}');
     }
+    final moving = Map<String, VodSession>.from(_sessions);
     _sessions.clear();
+    for (final e in moving.entries) {
+      if (hard) {
+        e.value.close(reason: reason);
+      } else {
+        _park(e.key, e.value);
+      }
+    }
+    if (hard) _flushLingering(reason);
   }
+
+  void _park(String id, VodSession session) {
+    _lingering[id] = session;
+    _lingerTimers[id]?.cancel();
+    _lingerTimers[id] = Timer(lingerClosedFor, () {
+      _lingerTimers.remove(id);
+      final parked = _lingering.remove(id);
+      parked?.close(reason: 'linger-expired');
+    });
+  }
+
+  void _flushLingering(String reason) {
+    for (final timer in _lingerTimers.values) {
+      timer.cancel();
+    }
+    _lingerTimers.clear();
+    for (final session in _lingering.values) {
+      if (!session.isClosed) session.close(reason: reason);
+    }
+    _lingering.clear();
+  }
+
+  VodSession? _lookup(String id) => _sessions[id] ?? _lingering[id];
 
   Future<void> resetForTest() async {
     VodProxyLog.resetForTest();
@@ -85,7 +120,7 @@ class VodHttpProxy {
 
   void resumeStats() {
     for (final session in _sessions.values) {
-      session.startStats();
+      session.resumeStats();
     }
   }
 
@@ -196,6 +231,7 @@ class VodHttpProxy {
     Duration? attemptTimeout,
     Duration? fetchBudget,
     Duration? cursorWatchdog,
+    int? backBufferBytes,
     List<String> extras = const [],
   }) async {
     if (!await ensureStarted()) return null;
@@ -209,6 +245,7 @@ class VodHttpProxy {
       attemptTimeout: attemptTimeout,
       fetchBudget: fetchBudget,
       cursorWatchdog: cursorWatchdog,
+      backBufferBytes: backBufferBytes,
       expandHosts: false,
     );
     try {
@@ -232,6 +269,7 @@ class VodHttpProxy {
     Duration? attemptTimeout,
     Duration? fetchBudget,
     Duration? cursorWatchdog,
+    int? backBufferBytes,
     bool expandHosts = true,
   }) {
     final id = '$kind${++_seq}';
@@ -272,6 +310,7 @@ class VodHttpProxy {
       attemptTimeout: attemptTimeout ?? const Duration(seconds: 6),
       fetchBudget: fetchBudget ?? const Duration(seconds: 45),
       cursorWatchdog: cursorWatchdog ?? const Duration(milliseconds: 2500),
+      backBufferBytes: backBufferBytes,
     );
     session.onCursorStuck = () => onCursorStuck?.call();
     _sessions[id] = session;
@@ -303,7 +342,7 @@ class VodHttpProxy {
       final id = request.uri.pathSegments.isEmpty
           ? ''
           : request.uri.pathSegments.first;
-      final session = _sessions[id];
+      final session = _lookup(id);
       if (session == null) {
         response.statusCode = HttpStatus.notFound;
         await response.close();
