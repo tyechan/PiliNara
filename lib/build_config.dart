@@ -1,11 +1,11 @@
 abstract final class BuildConfig {
   static const int versionCode = int.fromEnvironment(
     'pili.code',
-    defaultValue: 2026101702,
+    defaultValue: 2026101703,
   );
   static const String versionName = String.fromEnvironment(
     'pili.name',
-    defaultValue: '2.1.6-1017b',
+    defaultValue: '2.1.6-1017c',
   );
 
   static const int buildTime = int.fromEnvironment('pili.time');

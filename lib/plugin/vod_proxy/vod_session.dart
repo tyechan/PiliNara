@@ -37,7 +37,7 @@ class VodSession {
     pool.onBan = (host) => _kickFetches(fromHost: host);
   }
 
-  static const int minBackBufferBytes = 96 * 1024 * 1024;
+  static const int minBackBufferBytes = 192 * 1024 * 1024;
 
   static int defaultBackBuffer(int windowBytes) =>
       windowBytes > minBackBufferBytes ? windowBytes : minBackBufferBytes;
@@ -94,6 +94,12 @@ class VodSession {
   bool get statsRunning => _statsTimer != null;
 
   bool get statsPaused => _statsPaused;
+
+  int get activeReads => _activeReads;
+
+  DateTime? lastClientAt;
+
+  void noteClient() => lastClientAt = DateTime.now();
 
   int get uniqueServedBytes {
     var n = 0;
@@ -161,6 +167,12 @@ class VodSession {
   void resumeStats() {
     _statsPaused = false;
     _pauseLogged = false;
+    VodProxyLog.log(
+      'session_resume id=$id kind=$kind '
+      'served=${_fmtBytes(uniqueServedBytes)} '
+      'fetched=${_fmtBytes(uniqueFetchedBytes)} '
+      'net=${_fmtBytes(_bytesNet)} cursor=$_cursor size=${fileSize ?? -1}',
+    );
     startStats();
   }
 
@@ -398,9 +410,12 @@ class VodSession {
       if (lastError is VodServeAbort) throw lastError as VodServeAbort;
 
       unawaited(
-        _chunk(idx, urgent: urgent).then<void>((_) {}, onError: (Object e) {
-          lastError = e;
-        }),
+        _chunk(idx, urgent: urgent).then<void>(
+          (_) {},
+          onError: (Object e) {
+            lastError = e;
+          },
+        ),
       );
 
       final slice = remaining < cursorWatchdog ? remaining : cursorWatchdog;
@@ -441,8 +456,16 @@ class VodSession {
     throw const _SessionClosed();
   }
 
+  void _noteFetchedExtent(int idx) {
+    final end = idx * chunkSize + _chunkLen(idx);
+    if (end > _highWater) _highWater = end;
+  }
+
   Future<void> _raceChunk(int idx, {String? avoidHost}) async {
     try {
+      final expected = _chunkLen(idx);
+      final cached = _chunks[idx];
+      if (cached != null && cached.length == expected) return;
       final size = fileSize;
       if (size == null || size <= 0) return;
       final start = idx * chunkSize;
@@ -456,6 +479,7 @@ class VodSession {
       if (fetched.bytes.length != want) return;
       _chunks[idx] = fetched.bytes;
       _fetchedChunks.add(idx);
+      _noteFetchedExtent(idx);
       _wakeWaiters();
     } on _SessionClosed {
       // Player moved on.
@@ -476,6 +500,9 @@ class VodSession {
         if (_closed) throw const _SessionClosed();
         final size = fileSize ?? await ensureSize();
         if (_closed) throw const _SessionClosed();
+        if (_fetchedChunks.contains(idx) && !_chunks.containsKey(idx)) {
+          VodProxyLog.log('refetch id=$id idx=$idx reason=evicted');
+        }
         final start = idx * chunkSize;
         final end = min(start + chunkSize, size);
         final want = end - start;
@@ -491,6 +518,7 @@ class VodSession {
         fileSize ??= fetched.total;
         _chunks[idx] = fetched.bytes;
         _fetchedChunks.add(idx);
+        _noteFetchedExtent(idx);
         return fetched.bytes;
       } finally {
         _inflight.remove(idx);
@@ -521,8 +549,7 @@ class VodSession {
       );
       if (url == null || url.isEmpty) {
         final primary = pool.primaryUrl;
-        if (primary.isNotEmpty &&
-            (!pool.isUrlBanned(primary) || allowBanned)) {
+        if (primary.isNotEmpty && (!pool.isUrlBanned(primary) || allowBanned)) {
           url = primary;
         }
       }
@@ -605,11 +632,13 @@ class VodSession {
       fn();
     }
 
-    _get(url, range).timeout(perTry).then(
-      (result) => settle(() => done.complete(result)),
-      onError: (Object e, StackTrace st) =>
-          settle(() => done.completeError(e, st)),
-    );
+    _get(url, range)
+        .timeout(perTry)
+        .then(
+          (result) => settle(() => done.complete(result)),
+          onError: (Object e, StackTrace st) =>
+              settle(() => done.completeError(e, st)),
+        );
     void watchKick() {
       _wake.future.then((_) {
         if (settled) return;
@@ -728,11 +757,11 @@ class VodSession {
     final size = fileSize;
     if (size != null && size <= windowBytes + backBufferBytes) return;
     final keepFrom = (_cursor - backBufferBytes).clamp(0, 1 << 30);
-    final keepTo = max(_cursor + windowBytes, _highWater);
+    // Never drop already-fetched data ahead of the cursor; only trim far behind.
     _chunks.removeWhere((idx, _) {
       if (_inflight.containsKey(idx)) return false;
       final start = idx * chunkSize;
-      return start + chunkSize < keepFrom || start > keepTo;
+      return start + chunkSize < keepFrom;
     });
   }
 

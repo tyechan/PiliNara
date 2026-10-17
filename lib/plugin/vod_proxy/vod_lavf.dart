@@ -9,5 +9,7 @@ abstract final class VodLavf {
       'http_persistent=1';
 
   static const directStream =
-      'reconnect=0,http_persistent=0,timeout=15000000,rw_timeout=15000000';
+      'reconnect=1,reconnect_on_network_error=1,reconnect_streamed=1,'
+      'reconnect_delay_max=8,timeout=15000000,rw_timeout=15000000,'
+      'http_persistent=0';
 }

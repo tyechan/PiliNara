@@ -21,11 +21,17 @@ class VodHttpProxy {
   final Map<String, VodSession> _lingering = {};
   final Map<String, Timer> _lingerTimers = {};
   static const Duration lingerClosedFor = Duration(seconds: 5);
+  static const Duration defaultOrphanAfter = Duration(seconds: 8);
+  Duration orphanAfter = defaultOrphanAfter;
   int _seq = 0;
   bool _forceDirectOnce = false;
   DateTime? lastRequestAt;
   int requestsServed = 0;
   void Function()? onCursorStuck;
+  Future<void> _wrapTail = Future<void>.value();
+  Timer? _orphanWatch;
+  String? _currentVideoId;
+  String? _currentAudioId;
 
   bool get isRunning => _server != null && port != null;
 
@@ -33,18 +39,51 @@ class VodHttpProxy {
 
   Iterable<VodSession> get debugSessions => _sessions.values;
 
+  Iterable<VodSession> get debugLingering => _lingering.values;
+
   void forceDirectOnce() {
     _forceDirectOnce = true;
+    _currentVideoId = null;
+    _currentAudioId = null;
+    closeAll(reason: 'force-direct');
+  }
+
+  bool mentionsActiveSession(String text) {
+    for (final id in _sessions.keys) {
+      if (text.contains('/$id') || text.contains(id)) return true;
+    }
+    return false;
+  }
+
+  Future<T> _withWrapLock<T>(Future<T> Function() fn) {
+    final done = Completer<void>();
+    final prev = _wrapTail;
+    _wrapTail = done.future;
+    return () async {
+      try {
+        await prev;
+        return await fn();
+      } finally {
+        done.complete();
+      }
+    }();
   }
 
   void closeAll({String reason = 'close'}) {
-    final hard = reason == 'reset-test' || reason == 'dispose';
+    final hard =
+        reason == 'reset-test' ||
+        reason == 'dispose' ||
+        reason == 'force-direct';
     if (_sessions.isEmpty && (!hard || _lingering.isEmpty)) return;
     if (_sessions.isNotEmpty) {
       VodProxyLog.log('close reason=$reason n=${_sessions.length}');
     }
     final moving = Map<String, VodSession>.from(_sessions);
     _sessions.clear();
+    if (hard) {
+      _currentVideoId = null;
+      _currentAudioId = null;
+    }
     for (final e in moving.entries) {
       if (hard) {
         e.value.close(reason: reason);
@@ -53,6 +92,7 @@ class VodHttpProxy {
       }
     }
     if (hard) _flushLingering(reason);
+    _syncOrphanWatch();
   }
 
   void _park(String id, VodSession session) {
@@ -76,7 +116,56 @@ class VodHttpProxy {
     _lingering.clear();
   }
 
-  VodSession? _lookup(String id) => _sessions[id] ?? _lingering[id];
+  VodSession? _lookup(String id) {
+    final active = _sessions[id];
+    if (active != null) return active;
+    final parked = _lingering.remove(id);
+    if (parked == null) return null;
+    _lingerTimers.remove(id)?.cancel();
+    _sessions[id] = parked;
+    VodProxyLog.log('session-reclaim id=$id');
+    _syncOrphanWatch();
+    return parked;
+  }
+
+  void _armOrphanWatch() {
+    _orphanWatch ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      _sweepOrphans();
+    });
+  }
+
+  void _syncOrphanWatch() {
+    if (_sessions.isEmpty && _lingering.isEmpty) {
+      _orphanWatch?.cancel();
+      _orphanWatch = null;
+      return;
+    }
+    _armOrphanWatch();
+  }
+
+  void _sweepOrphans() {
+    final now = DateTime.now();
+    final stale = <String>[];
+    for (final e in _sessions.entries) {
+      if (e.key == _currentVideoId || e.key == _currentAudioId) continue;
+      if (e.value.activeReads > 0) continue;
+      final last = e.value.lastClientAt ?? e.value.startedAt;
+      if (now.difference(last) < orphanAfter) continue;
+      stale.add(e.key);
+    }
+    for (final e in _lingering.entries) {
+      if (e.value.activeReads > 0) continue;
+      final last = e.value.lastClientAt ?? e.value.startedAt;
+      if (now.difference(last) < orphanAfter) continue;
+      stale.add(e.key);
+    }
+    for (final id in stale) {
+      final session = _sessions.remove(id) ?? _lingering.remove(id);
+      _lingerTimers.remove(id)?.cancel();
+      session?.close(reason: 'orphan');
+    }
+    _syncOrphanWatch();
+  }
 
   Future<void> resetForTest() async {
     VodProxyLog.resetForTest();
@@ -87,6 +176,11 @@ class VodHttpProxy {
     requestsServed = 0;
     lastRequestAt = null;
     onCursorStuck = null;
+    orphanAfter = defaultOrphanAfter;
+    _currentVideoId = null;
+    _currentAudioId = null;
+    _orphanWatch?.cancel();
+    _orphanWatch = null;
     final server = _server;
     _server = null;
     port = null;
@@ -99,7 +193,10 @@ class VodHttpProxy {
   String hostsFor(String kind) {
     for (final session in _sessions.values) {
       if (session.kind != kind) continue;
-      final hosts = session.pool.topHosts(k: 3, kind: session.kind).map((h) => h.host).join(',');
+      final hosts = session.pool
+          .topHosts(k: 3, kind: session.kind)
+          .map((h) => h.host)
+          .join(',');
       return hosts.isEmpty ? '-' : hosts;
     }
     return '-';
@@ -155,9 +252,16 @@ class VodHttpProxy {
     }
   }
 
-  Future<NetworkSource?> wrap(NetworkSource source) async {
+  Future<NetworkSource?> wrap(NetworkSource source) {
+    return _withWrapLock(() => _wrapUnlocked(source));
+  }
+
+  Future<NetworkSource?> _wrapUnlocked(NetworkSource source) async {
     if (_forceDirectOnce) {
       _forceDirectOnce = false;
+      _currentVideoId = null;
+      _currentAudioId = null;
+      closeAll(reason: 'force-direct');
       VodProxyLog.log('wrap-skip force-direct');
       return null;
     }
@@ -172,13 +276,16 @@ class VodHttpProxy {
       primary: source.videoSource,
       extras: source.videoCandidates,
     );
+    final videoSession = _sessions[videoId];
+    if (videoSession == null) return null;
     try {
-      await _sessions[videoId]!.ensureSize();
+      await videoSession.ensureSize();
     } catch (e) {
       VodProxyLog.log('probe-failed video $e — using direct URL');
-      _sessions[videoId]?.fallbackReason = e.toString();
-      _sessions[videoId]?.close(reason: 'probe-failed');
+      videoSession.fallbackReason = e.toString();
+      videoSession.close(reason: 'probe-failed');
       _sessions.remove(videoId);
+      _currentVideoId = null;
       return null;
     }
     String? audio;
@@ -188,25 +295,40 @@ class VodHttpProxy {
         primary: a,
         extras: source.audioCandidates,
       );
+      final audioSession = _sessions[audioId];
       try {
-        await _sessions[audioId]!.ensureSize();
+        await audioSession!.ensureSize();
         audio = _url(audioId);
+        _currentAudioId = audioId;
       } catch (e) {
         VodProxyLog.log('probe-failed audio $e — using direct audio');
-        _sessions[audioId]?.fallbackReason = e.toString();
-        _sessions[audioId]?.close(reason: 'probe-failed');
+        audioSession?.fallbackReason = e.toString();
+        audioSession?.close(reason: 'probe-failed');
         _sessions.remove(audioId);
         audio = a;
+        _currentAudioId = null;
       }
+    } else {
+      _currentAudioId = null;
     }
+    _currentVideoId = videoId;
     final video = _url(videoId);
-    final vHosts = _sessions[videoId]?.pool.topHosts(k: 3, kind: 'video').map((h) => h.host).join(',') ?? '-';
+    final vHosts =
+        _sessions[videoId]?.pool
+            .topHosts(k: 3, kind: 'video')
+            .map((h) => h.host)
+            .join(',') ??
+        '-';
     final aId = audio != null && audio.startsWith('http://127.0.0.1')
         ? audio.split('/').last
         : null;
     final aHosts = aId == null
         ? '-'
-        : (_sessions[aId]?.pool.topHosts(k: 3, kind: 'audio').map((h) => h.host).join(',') ?? '-');
+        : (_sessions[aId]?.pool
+                  .topHosts(k: 3, kind: 'audio')
+                  .map((h) => h.host)
+                  .join(',') ??
+              '-');
     VodProxyLog.log(
       'wrap video=$video audio=${audio ?? '-'} '
       'srcHost=${Uri.tryParse(source.videoSource)?.host ?? '-'} '
@@ -233,30 +355,37 @@ class VodHttpProxy {
     Duration? cursorWatchdog,
     int? backBufferBytes,
     List<String> extras = const [],
-  }) async {
-    if (!await ensureStarted()) return null;
-    final id = _register(
-      kind: kind,
-      primary: primary,
-      extras: extras,
-      chunkSize: chunkSize,
-      windowBytes: windowBytes,
-      workers: workers,
-      attemptTimeout: attemptTimeout,
-      fetchBudget: fetchBudget,
-      cursorWatchdog: cursorWatchdog,
-      backBufferBytes: backBufferBytes,
-      expandHosts: false,
-    );
-    try {
-      await _sessions[id]!.ensureSize();
-    } catch (e) {
-      VodProxyLog.log('openRaw-probe-failed $e');
-      _sessions[id]?.close(reason: 'probe-failed');
-      _sessions.remove(id);
-      return null;
-    }
-    return _url(id);
+  }) {
+    return _withWrapLock(() async {
+      if (!await ensureStarted()) return null;
+      final id = _register(
+        kind: kind,
+        primary: primary,
+        extras: extras,
+        chunkSize: chunkSize,
+        windowBytes: windowBytes,
+        workers: workers,
+        attemptTimeout: attemptTimeout,
+        fetchBudget: fetchBudget,
+        cursorWatchdog: cursorWatchdog,
+        backBufferBytes: backBufferBytes,
+        expandHosts: false,
+      );
+      try {
+        await _sessions[id]!.ensureSize();
+      } catch (e) {
+        VodProxyLog.log('openRaw-probe-failed $e');
+        _sessions[id]?.close(reason: 'probe-failed');
+        _sessions.remove(id);
+        return null;
+      }
+      if (kind == 'audio') {
+        _currentAudioId = id;
+      } else {
+        _currentVideoId = id;
+      }
+      return _url(id);
+    });
   }
 
   String _register({
@@ -313,7 +442,9 @@ class VodHttpProxy {
       backBufferBytes: backBufferBytes,
     );
     session.onCursorStuck = () => onCursorStuck?.call();
+    session.noteClient();
     _sessions[id] = session;
+    _syncOrphanWatch();
     return id;
   }
 
@@ -348,6 +479,7 @@ class VodHttpProxy {
         await response.close();
         return;
       }
+      session.noteClient();
       final size = await session.ensureSize();
       if (size <= 0) {
         response.statusCode = HttpStatus.badGateway;
