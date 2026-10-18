@@ -1,13 +1,21 @@
 import 'dart:math';
 
 import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_host_health.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_lavf.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_session.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  setUp(() {
+    VodHostHealth.instance.resetForTest();
+    VodProxyLog.resetForTest();
+  });
+
   group('splitRanges', () {
     test('splits a span into fixed chunks', () {
       expect(
@@ -112,7 +120,10 @@ void main() {
     pool.recordSuccess(hw, bytes: 512 * 1024, elapsedMs: 200);
     expect(pool.preferred?.host, 'upos-sz-mirrorhw.bilivideo.com');
     pool.recordFailure(ali, reason: 'TimeoutException');
-    expect(pool.available.map((h) => h.host), contains('upos-sz-mirrorali.bilivideo.com'));
+    expect(
+      pool.available.map((h) => h.host),
+      contains('upos-sz-mirrorali.bilivideo.com'),
+    );
     pool.recordFailure(ali, reason: 'TimeoutException');
     pool.recordFailure(ali, reason: 'TimeoutException');
     expect(
@@ -142,9 +153,18 @@ void main() {
   });
 
   test('overseas hosts are scored lower unless they win the probe', () {
-    expect(VodHostPool.isOverseasHost('upos-hz-mirrorakam.akamaized.net'), isTrue);
-    expect(VodHostPool.isOverseasHost('upos-sz-mirrorcosov.bilivideo.com'), isFalse);
-    expect(VodHostPool.isOverseasHost('upos-sz-mirrorali.bilivideo.com'), isFalse);
+    expect(
+      VodHostPool.isOverseasHost('upos-hz-mirrorakam.akamaized.net'),
+      isTrue,
+    );
+    expect(
+      VodHostPool.isOverseasHost('upos-sz-mirrorcosov.bilivideo.com'),
+      isFalse,
+    );
+    expect(
+      VodHostPool.isOverseasHost('upos-sz-mirrorali.bilivideo.com'),
+      isFalse,
+    );
     const akam = 'https://upos-hz-mirrorakam.akamaized.net/a.m4s';
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
     final pool = VodHostPool([akam, ali], random: Random(1));
@@ -212,7 +232,10 @@ void main() {
       isNot(contains('upos-sz-mirrorali.bilivideo.com')),
     );
     final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
-    banned.blacklistedUntil = DateTime.now().subtract(const Duration(seconds: 1));
+    banned.blacklistedUntil = DateTime.now().subtract(
+      const Duration(seconds: 1),
+    );
+    banned.bannedAt = DateTime.now().subtract(const Duration(seconds: 31));
     expect(
       pool.available.map((h) => h.host),
       contains('upos-sz-mirrorali.bilivideo.com'),
@@ -262,8 +285,10 @@ void main() {
       pool.recordFailure(ali, reason: 'TimeoutException');
     }
     final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
-    banned.blacklistedUntil =
-        DateTime.now().subtract(const Duration(seconds: 1));
+    banned.blacklistedUntil = DateTime.now().subtract(
+      const Duration(seconds: 1),
+    );
+    banned.bannedAt = DateTime.now().subtract(const Duration(seconds: 31));
     pool.describe();
     expect(banned.blacklistedUntil, isNull);
     expect(
@@ -305,6 +330,208 @@ void main() {
         lastVideoPts: 1.0,
       ),
       isTrue,
+    );
+  });
+
+  test('video-slow host is ranked last and remembered app-wide', () {
+    const slow = 'https://upos-sz-mirrorcosov.bilivideo.com/a.m4s';
+    const fast = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    VodHostHealth.instance.noteVideoProbe(
+      'upos-sz-mirrorcosov.bilivideo.com',
+      ttfbMs: 2100,
+      thruMbps: 0.45,
+    );
+    expect(
+      VodHostHealth.instance.isVideoSlow('upos-sz-mirrorcosov.bilivideo.com'),
+      isTrue,
+    );
+    final pool = VodHostPool([slow, fast], random: Random(1));
+    pool.recordSuccess(slow, bytes: 256 * 1024, elapsedMs: 4000, ttfbMs: 2100);
+    pool.recordSuccess(fast, bytes: 256 * 1024, elapsedMs: 200, ttfbMs: 40);
+    expect(
+      pool.topHosts(k: 2, kind: 'video').first.host,
+      'upos-sz-mirrorhw.bilivideo.com',
+    );
+    expect(
+      pool.topHosts(k: 2, kind: 'video').last.host,
+      'upos-sz-mirrorcosov.bilivideo.com',
+    );
+  });
+
+  test('unban does not fire before the 30s floor', () {
+    VodProxyLog.resetForTest();
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw], random: Random(1));
+    for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+      pool.recordFailure(ali, reason: 'TimeoutException');
+    }
+    final banned = pool.hosts.firstWhere((h) => h.host.contains('mirrorali'));
+    banned.blacklistedUntil = DateTime.now().subtract(
+      const Duration(seconds: 1),
+    );
+    banned.bannedAt = DateTime.now().subtract(const Duration(seconds: 2));
+    expect(
+      pool.available.map((h) => h.host),
+      isNot(contains('upos-sz-mirrorali.bilivideo.com')),
+    );
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('unban host=')),
+      isFalse,
+    );
+  });
+
+  test('app-wide ban is consulted by a fresh pool', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final first = VodHostPool([ali, hw], random: Random(1));
+    for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+      first.recordFailure(ali, reason: 'TimeoutException');
+    }
+    expect(
+      VodHostHealth.instance.isBanned('upos-sz-mirrorali.bilivideo.com'),
+      isTrue,
+    );
+    final next = VodHostPool([ali, hw], random: Random(2));
+    for (var i = 0; i < 8; i++) {
+      expect(
+        Uri.parse(next.pickUrl()!).host,
+        'upos-sz-mirrorhw.bilivideo.com',
+      );
+    }
+  });
+
+  test('direct lavf timeout is 15s and proxy stays at 60s', () {
+    expect(VodLavf.directNetworkTimeout, '15');
+    expect(VodLavf.directStream, contains('timeout=15000000'));
+    expect(VodLavf.directStream, contains('rw_timeout=15000000'));
+    expect(VodLavf.directStream, contains('reconnect=1'));
+    expect(VodLavf.directStream, contains('reconnect_on_network_error=1'));
+    expect(VodLavf.proxyNetworkTimeout, '60');
+    expect(VodLavf.proxyStream, contains('timeout=60000000'));
+    expect(VodSession.minBackBufferBytes, 192 * 1024 * 1024);
+    expect(VodSession.defaultBackBuffer(8 * 1024 * 1024), 192 * 1024 * 1024);
+    expect(VodSession.defaultBackBuffer(256 * 1024 * 1024), 256 * 1024 * 1024);
+  });
+
+  test(
+    'first-frame-stuck fires when video-pts never leaves the opening frame',
+    () {
+      expect(
+        PlaybackDiag.freezeFirstFrameStuck(
+          videoMoved: false,
+          videoPts: null,
+          lastVideoPts: null,
+          audioMoved: true,
+        ),
+        isTrue,
+      );
+      expect(
+        PlaybackDiag.freezeFirstFrameStuck(
+          videoMoved: false,
+          videoPts: 0.0,
+          lastVideoPts: 0.0,
+          audioMoved: true,
+        ),
+        isTrue,
+      );
+      expect(
+        PlaybackDiag.freezeFirstFrameStuck(
+          videoMoved: true,
+          videoPts: null,
+          lastVideoPts: null,
+          audioMoved: true,
+        ),
+        isFalse,
+      );
+      expect(
+        PlaybackDiag.freezeVideoStuck(
+          videoMoved: false,
+          earlyEnd: false,
+          videoPts: null,
+          frame: null,
+          firstFrame: true,
+        ),
+        isTrue,
+      );
+      expect(
+        PlaybackDiag.freezeAudioMoved(
+          audioPts: null,
+          lastAudioPts: null,
+          timePosSec: 4.0,
+          lastTimePosSec: 1.0,
+          clockFallback: true,
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test('freeze detector fires after partial-file when video-pts is gone', () {
+    expect(
+      PlaybackDiag.freezeVideoStuck(
+        videoMoved: false,
+        earlyEnd: true,
+        videoPts: null,
+        frame: null,
+      ),
+      isTrue,
+    );
+    expect(
+      PlaybackDiag.freezeAudioMoved(
+        audioPts: null,
+        lastAudioPts: null,
+        timePosSec: 12.0,
+        lastTimePosSec: 10.0,
+        earlyEnd: true,
+      ),
+      isTrue,
+    );
+    expect(
+      PlaybackDiag.freezeAudioMoved(
+        audioPts: null,
+        lastAudioPts: null,
+        timePosSec: 10.0,
+        lastTimePosSec: 10.0,
+        earlyEnd: true,
+      ),
+      isFalse,
+    );
+  });
+
+  test('recover allows five attempts per minute then give-up', () {
+    final t0 = DateTime.utc(2026, 10, 17, 12);
+    final attempts = <DateTime>[];
+    for (var i = 0; i < 5; i++) {
+      expect(
+        PlaybackDiag.recoverDecision(
+          attempts: attempts,
+          now: t0.add(Duration(seconds: 3 * i)),
+        ),
+        isNull,
+      );
+      attempts.add(t0.add(Duration(seconds: 3 * i)));
+    }
+    expect(
+      PlaybackDiag.recoverDecision(
+        attempts: attempts,
+        now: t0.add(const Duration(seconds: 14)),
+      ),
+      'give-up',
+    );
+    expect(
+      PlaybackDiag.recoverDecision(
+        attempts: [t0],
+        now: t0.add(const Duration(milliseconds: 500)),
+      ),
+      'cooldown',
+    );
+    expect(
+      PlaybackDiag.recoverDecision(
+        attempts: attempts,
+        now: t0.add(const Duration(minutes: 2)),
+      ),
+      isNull,
     );
   });
 }

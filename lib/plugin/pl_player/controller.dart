@@ -27,6 +27,7 @@ import 'package:PiliPlus/plugin/pl_player/models/double_tap_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/duration.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
+import 'package:PiliPlus/plugin/pl_player/models/play_coalesce.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/speed_lock_hint.dart';
@@ -35,6 +36,7 @@ import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
 import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_lavf.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/services/live_pip_overlay_service.dart';
 import 'package:PiliPlus/services/pip_overlay_service.dart';
@@ -577,7 +579,12 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool _openedViaProxy = false;
   bool _proxyFallbackScheduled = false;
   bool _proxyRecovering = false;
+  bool _proxyOpenRetried = false;
+  int _sourceGen = 0;
+  final PlayCoalesce _playCoalesce = PlayCoalesce();
   Timer? _proxyOpenWatchdog;
+  String? _proxyVideoUrl;
+  String? _proxyAudioUrl;
   final PlaybackDiag _diag = PlaybackDiag();
   String? _playTitle;
   String? _dashCodec;
@@ -1034,6 +1041,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     String? codec,
     String? fps,
   }) async {
+    final gen = ++_sourceGen;
     try {
       _processing = true;
       // 换视频/换P：解除倍速锁定并恢复锁定前速度。
@@ -1068,6 +1076,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       this.height = height;
       this.dataSource = dataSource;
       _autoPlay = autoplay;
+      if (autoplay) {
+        _playCoalesce.note(
+          processing: true,
+          intent: PlayIntent(
+            play: true,
+            position: seekTo,
+          ),
+        );
+      }
       _playTitle = title;
       _dashCodec = (codec == null || codec.isEmpty) ? null : codec;
       _dashFps = (fps == null || fps.isEmpty) ? null : fps;
@@ -1097,7 +1114,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         await pause(notify: false);
       }
 
-      if (_playerCount == 0) {
+      if (_playerCount == 0 || gen != _sourceGen) {
         if (kDebugMode) {
           debugPrint(
             '[PlPlayer] setDataSource aborted: _playerCount == 0 before init',
@@ -1106,8 +1123,16 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         return;
       }
       // 配置Player 音轨、字幕等等
-      await _createVideoController(dataSource, seekTo, volume);
+      await _createVideoController(dataSource, seekTo, volume, gen: gen);
 
+      if (gen != _sourceGen) {
+        if (kDebugMode) {
+          debugPrint(
+            '[PlPlayer] setDataSource aborted: superseded after createVideoController',
+          );
+        }
+        return;
+      }
       if (_playerCount == 0) {
         if (kDebugMode) {
           debugPrint(
@@ -1133,6 +1158,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         triggerFullScreen(status: true);
       }
 
+      if (gen != _sourceGen) return;
       await _initializePlayer();
       onInit?.call();
     } catch (err, stackTrace) {
@@ -1142,7 +1168,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         debugPrint('plPlayer err:  $err');
       }
     } finally {
-      _processing = false;
+      if (gen == _sourceGen) {
+        _processing = false;
+        await _flushPendingPlay();
+      }
     }
   }
 
@@ -1209,10 +1238,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final opt = {
       'video-sync': Pref.videoSync,
       if (Platform.isAndroid) 'ao': Pref.audioOutput,
-      'volume': (PlatformUtils.isMobile
-              ? (Pref.enableAppVolume ? volume.value * 100 : Pref.playerVolume)
-              : volume.value * 100)
-          .toString(),
+      'volume':
+          (PlatformUtils.isMobile
+                  ? (Pref.enableAppVolume
+                        ? volume.value * 100
+                        : Pref.playerVolume)
+                  : volume.value * 100)
+              .toString(),
       'volume-max': kMaxVolume.toString(),
     };
     final autosync = Pref.autosync;
@@ -1244,12 +1276,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // Comma-separated lavf AVOptions. Do NOT put this in Media extras:
       // media_kit splits extras on commas and ffmpeg then sees
       // reconnect=0:http_persistent=0 as one boolean.
-      try {
-        player.setProperty(
-          'stream-lavf-o',
-          'reconnect=0,http_persistent=0',
-        );
-      } catch (_) {}
+      _applyLavfOptions(player, proxy: false);
     }
 
     player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
@@ -1259,6 +1286,35 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     return player;
   }
 
+  void _applyLavfOptions(Player player, {required bool proxy}) {
+    try {
+      player.setProperty(
+        'network-timeout',
+        proxy ? VodLavf.proxyNetworkTimeout : VodLavf.directNetworkTimeout,
+      );
+      player.setProperty(
+        'stream-lavf-o',
+        proxy ? VodLavf.proxyStream : VodLavf.directStream,
+      );
+    } catch (_) {}
+  }
+
+  void _logLavfOpts(Player player) {
+    String prop(String name) {
+      try {
+        return player.getProperty(name);
+      } catch (_) {
+        return '';
+      }
+    }
+
+    VodProxyLog.play(
+      'lavf-opts network-timeout=${prop('network-timeout')} '
+      'stream-lavf-o=${prop('stream-lavf-o')} '
+      'demuxer-lavf-o=${prop('demuxer-lavf-o')}',
+    );
+  }
+
   late final buffer = Pref.initBuffer(_playbackSpeed.value);
   late final liveBuffer = Pref.initLiveBuffer();
 
@@ -1266,8 +1322,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   Future<void> _createVideoController(
     DataSource dataSource,
     Duration? seekTo,
-    Volume? volume,
-  ) async {
+    Volume? volume, {
+    int? gen,
+  }) async {
     isBuffering.value = false;
     _heartDuration = 0;
     position.value = seekTo?.inSeconds ?? 0;
@@ -1302,6 +1359,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
 
     var playSource = dataSource;
     _openedViaProxy = false;
+    _proxyVideoUrl = null;
+    _proxyAudioUrl = null;
     if (!isLive &&
         playSource is NetworkSource &&
         Pref.vodMultiConnProxy &&
@@ -1312,6 +1371,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           playSource = wrapped;
           _openedViaProxy = true;
           _proxyFallbackScheduled = false;
+          _proxyOpenRetried = false;
+          _proxyVideoUrl = wrapped.videoSource;
+          _proxyAudioUrl = wrapped.audioSource;
           _armProxyOpenWatchdog();
         }
       } catch (e) {
@@ -1338,6 +1400,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     }
 
     assert(!isLive || seekTo == null);
+    if (gen != null && gen != _sourceGen) return;
+    _applyLavfOptions(player, proxy: _openedViaProxy);
     await player.open(
       Media(video, start: seekTo, extras: extras.isEmpty ? null : extras),
       play: false,
@@ -1357,10 +1421,14 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
             : '-',
         dashCodec: _dashCodec,
       );
-      _diag.onEarlyEnd = _openedViaProxy ? _recoverProxyVideo : null;
+      _diag.onEarlyEnd = _recoverPlayback;
+      _diag.onRecoverGiveUp = _openedViaProxy
+          ? (reason) => _scheduleProxyFallback('recover-giveup $reason')
+          : null;
       VodHttpProxy.instance.onCursorStuck = _openedViaProxy
           ? () => _scheduleProxyFallback('cursor-stuck')
           : null;
+      _logLavfOpts(player);
     }
   }
 
@@ -1390,7 +1458,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     final audioHosts = _openedViaProxy
         ? VodHttpProxy.instance.hostsFor('audio')
         : aHost;
-    final dur = _dashDurationSec ??
+    final dur =
+        _dashDurationSec ??
         (duration.value > 0
             ? duration.value
             : (_videoPlayerController?.state.duration.inSeconds ?? 0));
@@ -1652,13 +1721,53 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     _subscriptions = null;
   }
 
+  bool _mentionsCurrentProxy(String text) {
+    final video = _proxyVideoUrl;
+    final audio = _proxyAudioUrl;
+    if (video != null && text.contains(video)) return true;
+    if (audio != null && audio.isNotEmpty && text.contains(audio)) {
+      return true;
+    }
+    return VodHttpProxy.instance.mentionsActiveSession(text);
+  }
+
   void _noteMpvLogForProxy(PlayerLog log) {
     final text = log.text;
-    if (_openedViaProxy &&
-        (text.contains('Could not open source file') ||
-            text.contains('Failed to open http://127.0.0.1') ||
-            text.contains('Failed to open http://[::1]'))) {
-      _scheduleProxyFallback('mpv-open-fail ${log.prefix}');
+    if (!_openedViaProxy) return;
+    if (!(text.contains('Could not open source file') ||
+        text.contains('Failed to open http://127.0.0.1') ||
+        text.contains('Failed to open http://[::1]'))) {
+      return;
+    }
+    if (!_mentionsCurrentProxy(text)) {
+      VodProxyLog.play('stale-open-fail ignore ${log.prefix}');
+      return;
+    }
+    if (!_proxyOpenRetried) {
+      _proxyOpenRetried = true;
+      VodProxyLog.play('retry-proxy reason=mpv-open-fail ${log.prefix}');
+      unawaited(_retryCurrentProxy());
+      return;
+    }
+    _scheduleProxyFallback('mpv-open-fail ${log.prefix}');
+  }
+
+  Future<void> _retryCurrentProxy() async {
+    final player = _videoPlayerController;
+    if (player == null || player.current.isEmpty || _playerCount == 0) {
+      _scheduleProxyFallback('retry-proxy-empty');
+      return;
+    }
+    try {
+      var media = player.current.last;
+      final pos = player.state.position;
+      if (pos > Duration.zero) {
+        media = media.copyWith(start: pos);
+      }
+      await player.open(media, play: _autoPlay);
+    } catch (e) {
+      VodProxyLog.play('retry-proxy-failed $e');
+      _scheduleProxyFallback('retry-proxy-failed $e');
     }
   }
 
@@ -1671,8 +1780,8 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
     });
   }
 
-  void _recoverProxyVideo(String reason) {
-    if (!_openedViaProxy || isLive || _proxyRecovering || _playerCount == 0) {
+  void _recoverPlayback(String reason) {
+    if (isLive || _proxyRecovering || _playerCount == 0) {
       return;
     }
     final player = _videoPlayerController;
@@ -1829,15 +1938,42 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// 播放视频
   Future<void> play({bool repeat = false, bool hideControls = true}) async {
     if (_playerCount == 0) return;
-    // 播放时自动隐藏控制条
-    final showControlsOnNextPlay = _consumeShowControlsOnNextPlay();
-    controls = !hideControls || showControlsOnNextPlay;
-    // repeat为true，将从头播放
-    if (repeat) {
-      await seekTo(Duration.zero, isSeek: false);
+    final intent = PlayIntent(
+      play: true,
+      repeat: repeat,
+      hideControls: hideControls,
+      position: repeat ? Duration.zero : _videoPlayerController?.state.position,
+    );
+    final startNow = _playCoalesce.note(
+      processing: _processing,
+      intent: intent,
+    );
+    if (!startNow) {
+      _autoPlay = true;
+      VodProxyLog.play('play-coalesce processing');
+      return;
     }
+    await _applyPlay(intent);
+  }
 
+  Future<void> _applyPlay(PlayIntent intent) async {
+    final showControlsOnNextPlay = _consumeShowControlsOnNextPlay();
+    controls = !intent.hideControls || showControlsOnNextPlay;
+    if (intent.repeat) {
+      await seekTo(Duration.zero, isSeek: false);
+    } else if (intent.position != null &&
+        intent.position! > Duration.zero &&
+        (_videoPlayerController?.state.position.inMilliseconds ?? 0) == 0) {
+      await seekTo(intent.position!, isSeek: false);
+    }
     await _rawPlay();
+  }
+
+  Future<void> _flushPendingPlay() async {
+    final pending = _playCoalesce.take();
+    if (pending == null || !pending.play || _playerCount == 0) return;
+    _autoPlay = true;
+    await _applyPlay(pending);
   }
 
   /// 暂停播放
@@ -2773,6 +2909,13 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       case AppLifecycleState.resumed:
         if (Platform.isAndroid && !isLive) {
           VodHttpProxy.instance.resumeStats();
+          if (_diag.sawNullSurfaceRecently) {
+            final player = _videoPlayerController;
+            if (player != null) {
+              VodProxyLog.play('surface-reload after mediacodec NULL');
+              unawaited(player.command(const ['video-reload']));
+            }
+          }
         }
         _cancelAutoAudioOnlyTimer();
         if (_autoAudioState == AutoAudioOnlyState.autoAudioOnly) {
