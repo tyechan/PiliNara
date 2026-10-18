@@ -71,9 +71,9 @@ void main() {
     expect(BuildConfig.displayVersion.length, lessThanOrEqualTo(24));
     expect(BuildConfig.displayVersion, contains('·'));
     expect(BuildConfig.versionName.length, lessThanOrEqualTo(16));
-    expect(BuildConfig.versionName, '2.1.6-1017c');
-    expect(VodProxyLog.bootLine, contains('2.1.6-1017c'));
-    expect(VodProxyLog.bootLine, contains('2026101703'));
+    expect(BuildConfig.versionName, '2.1.6-1017d');
+    expect(VodProxyLog.bootLine, contains('2.1.6-1017d'));
+    expect(VodProxyLog.bootLine, contains('2026101801'));
     expect(BuildConfig.displayVersion, contains('2.1.6 · 1017'));
     expect(BuildConfig.displayVersion.split('\n'), hasLength(1));
     expect(VodProxyLog.safeTitle('audio2'), '-');

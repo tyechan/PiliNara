@@ -94,6 +94,7 @@ jobs:
                   tag_name: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
                   name: ${{ format('PiliPala {0} ({1})', env.version, env.version_code) }}
                   target_commitish: ${{ github.sha }}
+                  prerelease: true
                   files: |
                       PiliPala-*.apk
 
