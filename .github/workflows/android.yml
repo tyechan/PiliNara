@@ -95,6 +95,7 @@ jobs:
                   name: ${{ format('PiliPala {0} ({1})', env.version, env.version_code) }}
                   body_path: .github/release_body.md
                   target_commitish: ${{ github.sha }}
+                  prerelease: true
                   files: |
                       PiliPala-*.apk
 
