@@ -13,10 +13,10 @@ void main() {
   test('parses 10-digit versionCode from short fork names', () {
     expect(
       Update.parseRemoteVersionCode(
-        tagName: 'v2.6.1.1-1018a+abc1234',
-        name: 'PiliPala 2.6.1.1-1018a+abc1234 (2026101801)',
+        tagName: 'v2.6.1.1-1018b+abc1234',
+        name: 'PiliPala 2.6.1.1-1018b+abc1234 (2026101802)',
       ),
-      2026101801,
+      2026101802,
     );
     expect(
       Update.parseRemoteVersionCode(
@@ -85,9 +85,9 @@ void main() {
     expect(BuildConfig.displayVersion.length, lessThanOrEqualTo(24));
     expect(BuildConfig.displayVersion, '2.6.1.1 · 1018 · dev');
     expect(BuildConfig.versionName.length, lessThanOrEqualTo(16));
-    expect(BuildConfig.versionName, '2.6.1.1-1018a');
-    expect(VodProxyLog.bootLine, contains('2.6.1.1-1018a'));
-    expect(VodProxyLog.bootLine, contains('2026101801'));
+    expect(BuildConfig.versionName, '2.6.1.1-1018b');
+    expect(VodProxyLog.bootLine, contains('2.6.1.1-1018b'));
+    expect(VodProxyLog.bootLine, contains('2026101802'));
     expect(BuildConfig.displayVersion, contains('2.6.1.1 · 1018'));
     expect(BuildConfig.displayVersion.split('\n'), hasLength(1));
     expect(VodProxyLog.safeTitle('audio2'), '-');
@@ -109,7 +109,7 @@ void main() {
     expect(
       Update.isRemoteNewer(
         localVersionCode: 2026101703,
-        remoteVersionCode: 2026101801,
+        remoteVersionCode: 2026101802,
       ),
       isTrue,
     );
