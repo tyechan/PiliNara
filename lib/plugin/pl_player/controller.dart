@@ -27,6 +27,7 @@ import 'package:PiliPlus/plugin/pl_player/models/double_tap_type.dart';
 import 'package:PiliPlus/plugin/pl_player/models/duration.dart';
 import 'package:PiliPlus/plugin/pl_player/models/fullscreen_mode.dart';
 import 'package:PiliPlus/plugin/pl_player/models/heart_beat_type.dart';
+import 'package:PiliPlus/plugin/pl_player/models/play_coalesce.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/plugin/pl_player/models/speed_lock_hint.dart';
@@ -580,6 +581,7 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   bool _proxyRecovering = false;
   bool _proxyOpenRetried = false;
   int _sourceGen = 0;
+  final PlayCoalesce _playCoalesce = PlayCoalesce();
   Timer? _proxyOpenWatchdog;
   String? _proxyVideoUrl;
   String? _proxyAudioUrl;
@@ -1074,6 +1076,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       this.height = height;
       this.dataSource = dataSource;
       _autoPlay = autoplay;
+      if (autoplay) {
+        _playCoalesce.note(
+          processing: true,
+          intent: PlayIntent(
+            play: true,
+            position: seekTo,
+          ),
+        );
+      }
       _playTitle = title;
       _dashCodec = (codec == null || codec.isEmpty) ? null : codec;
       _dashFps = (fps == null || fps.isEmpty) ? null : fps;
@@ -1114,7 +1125,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
       // 配置Player 音轨、字幕等等
       await _createVideoController(dataSource, seekTo, volume, gen: gen);
 
-      if (_playerCount == 0 || gen != _sourceGen) {
+      if (gen != _sourceGen) {
+        if (kDebugMode) {
+          debugPrint(
+            '[PlPlayer] setDataSource aborted: superseded after createVideoController',
+          );
+        }
+        return;
+      }
+      if (_playerCount == 0) {
         if (kDebugMode) {
           debugPrint(
             '[PlPlayer] setDataSource aborted: _playerCount == 0 after createVideoController',
@@ -1149,7 +1168,10 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
         debugPrint('plPlayer err:  $err');
       }
     } finally {
-      if (gen == _sourceGen) _processing = false;
+      if (gen == _sourceGen) {
+        _processing = false;
+        await _flushPendingPlay();
+      }
     }
   }
 
@@ -1914,19 +1936,42 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   /// 播放视频
   Future<void> play({bool repeat = false, bool hideControls = true}) async {
     if (_playerCount == 0) return;
-    if (_processing) {
-      VodProxyLog.play('play-skip processing');
+    final intent = PlayIntent(
+      play: true,
+      repeat: repeat,
+      hideControls: hideControls,
+      position: repeat ? Duration.zero : _videoPlayerController?.state.position,
+    );
+    final startNow = _playCoalesce.note(
+      processing: _processing,
+      intent: intent,
+    );
+    if (!startNow) {
+      _autoPlay = true;
+      VodProxyLog.play('play-coalesce processing');
       return;
     }
-    // 播放时自动隐藏控制条
-    final showControlsOnNextPlay = _consumeShowControlsOnNextPlay();
-    controls = !hideControls || showControlsOnNextPlay;
-    // repeat为true，将从头播放
-    if (repeat) {
-      await seekTo(Duration.zero, isSeek: false);
-    }
+    await _applyPlay(intent);
+  }
 
+  Future<void> _applyPlay(PlayIntent intent) async {
+    final showControlsOnNextPlay = _consumeShowControlsOnNextPlay();
+    controls = !intent.hideControls || showControlsOnNextPlay;
+    if (intent.repeat) {
+      await seekTo(Duration.zero, isSeek: false);
+    } else if (intent.position != null &&
+        intent.position! > Duration.zero &&
+        (_videoPlayerController?.state.position.inMilliseconds ?? 0) == 0) {
+      await seekTo(intent.position!, isSeek: false);
+    }
     await _rawPlay();
+  }
+
+  Future<void> _flushPendingPlay() async {
+    final pending = _playCoalesce.take();
+    if (pending == null || !pending.play || _playerCount == 0) return;
+    _autoPlay = true;
+    await _applyPlay(pending);
   }
 
   /// 暂停播放
