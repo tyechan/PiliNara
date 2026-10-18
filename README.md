@@ -35,6 +35,7 @@
 - 关于页一行：`2.6.1.1 · 1018 · <短哈希>`
 - `versionCode`：`YYYYMMDD` + 当日序号，例如 `2026101802`
 - Git 标签：`v2.6.1.1-1018b+<短哈希>`
+- `pubspec.yaml` 的 `version` 只能是 Dart semver（`2.6.1+2026101802`）。真正写进 APK、关于页和日志的是 `lib/build_config.dart` 里的 `2.6.1.1-1018b`，由 `build_fork.sh` 用 `--build-name` 传给 Flutter。
 - 应用内检查更新只看本仓库 Release，用 `versionCode` 比较，不再用官方构建时间。
 
 ## 如何同步上游
@@ -67,7 +68,9 @@ flutter test test/plugin/pl_player/player_controls_widget_test.dart \
 
 ```bash
 bash lib/scripts/build_fork.sh
-flutter build apk --release --split-per-abi --dart-define-from-file=pili_release.json
+flutter build apk --release --split-per-abi \
+  --build-name=2.6.1.1-1018b --build-number=2026101802 \
+  --dart-define-from-file=pili_release.json
 ```
 
 Release 签名需要 `android/key.properties` 指向专用 keystore。CI 从 GitHub Secrets 写入：
