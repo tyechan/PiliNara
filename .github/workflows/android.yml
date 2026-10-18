@@ -4,7 +4,7 @@ on:
     push:
         tags:
             - "v*-btr-proxy*"
-            - "v2.1.6-*"
+            - "v2.*"
     pull_request:
         types:
             - opened
