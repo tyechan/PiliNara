@@ -14,6 +14,7 @@ class BottomControl extends StatelessWidget {
     super.key,
     required this.maxWidth,
     required this.isFullScreen,
+    required this.animCtr,
     required this.controller,
     required this.buildBottomControl,
     required this.videoDetailController,
@@ -21,6 +22,7 @@ class BottomControl extends StatelessWidget {
 
   final double maxWidth;
   final bool isFullScreen;
+  final AnimationController animCtr;
   final PlPlayerController controller;
   final ValueGetter<Widget> buildBottomControl;
   final VideoDetailController videoDetailController;
@@ -49,6 +51,7 @@ class BottomControl extends StatelessWidget {
   }
 
   void _onHover(double dx, int seconds) {
+    if (animCtr.isAnimating) return;
     controller
       ..hoverDx = dx
       ..seekPosition.value = seconds
@@ -56,12 +59,13 @@ class BottomControl extends StatelessWidget {
   }
 
   void _onExit() {
-    if (!controller.isSeeking.value) {
-      controller
-        ..hoverDx = null
-        ..showPreview.value = false
-        ..hideTaskControls();
+    if (controller.isSeeking.value || controller.hoverDx == null) {
+      return;
     }
+    controller
+      ..hoverDx = null
+      ..showPreview.value = false
+      ..hideTaskControls();
   }
 
   @override
