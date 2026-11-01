@@ -33,15 +33,35 @@ class BottomControl extends StatelessWidget {
   void onDragUpdate(ThumbDragDetails duration) {
     if (!controller.isFileSource && controller.showSeekPreview) {
       controller.updatePreviewIndex(duration.seconds);
+      if (controller.hoverDx != null) {
+        controller.hoverDx = duration.localPosition.dx;
+      }
     }
     controller.seekPosition.value = duration.seconds;
   }
 
   void onSeek(int milliseconds) {
     controller
+      ..hoverDx = null
       ..position.value = milliseconds ~/ 1000
       ..onSeekEnd()
       ..seekTo(Duration(milliseconds: milliseconds), isSeek: false);
+  }
+
+  void _onHover(double dx, int seconds) {
+    controller
+      ..hoverDx = dx
+      ..seekPosition.value = seconds
+      ..updatePreviewIndex(seconds);
+  }
+
+  void _onExit() {
+    if (!controller.isSeeking.value) {
+      controller
+        ..hoverDx = null
+        ..showPreview.value = false
+        ..hideTaskControls();
+    }
   }
 
   @override
@@ -52,6 +72,11 @@ class BottomControl extends StatelessWidget {
         : colorScheme.primary;
     final thumbGlowColor = primary.withAlpha(80);
     final bufferedBarColor = primary.withValues(alpha: 0.4);
+
+    final enableHover =
+        PlatformUtils.isDesktop &&
+        controller.showSeekPreview &&
+        !controller.isFileSource;
 
     return Padding(
       padding: const .symmetric(horizontal: 10, vertical: 12),
@@ -83,6 +108,8 @@ class BottomControl extends StatelessWidget {
                         onDragStart: onDragStart,
                         onDragUpdate: onDragUpdate,
                         onSeek: onSeek,
+                        onHover: enableHover ? _onHover : null,
+                        onExit: enableHover ? _onExit : null,
                       ),
                     ),
                     if (controller.enableBlock &&
