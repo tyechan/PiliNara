@@ -893,7 +893,7 @@ class RenderProgressBar extends RenderBox implements MouseTrackerAnnotation {
   void _handleOnExit(PointerExitEvent event) {
     __onExit?.call();
     // _hoverDx = null;
-    markNeedsPaint();
+    // markNeedsPaint();
   }
 
   VoidCallback? __onExit;
