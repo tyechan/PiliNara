@@ -23,6 +23,10 @@ void main() {
     tempDir = await Directory.systemTemp.createTemp('pilinara-account-test-');
     Hive.init(tempDir.path);
     GStorage.regAdapter();
+    // LoginAccount.buvid reads the custom buvid from settings on write.
+    GStorage.setting = await Hive.openBox('setting');
+    GStorage.localCache = await Hive.openBox('localCache');
+    GStorage.video = await Hive.openBox('video');
     Accounts.account = await Hive.openBox<LoginAccount>('account');
   });
 

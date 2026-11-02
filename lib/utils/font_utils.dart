@@ -25,6 +25,7 @@ abstract final class FontUtils {
   static final _fonts = <String>{};
   static bool _initialized = false;
 
+  static const kFontName = 'customFont.otf';
   static const _kFontExts = ['ttf', 'ttc', 'otf'];
   static final _kFontDir = path.join(appSupportDirPath, 'font');
 
@@ -36,6 +37,51 @@ abstract final class FontUtils {
 
   /// 已导入字体池：key 为字体族名，value 为文件绝对路径
   static final customFonts = Pref.customAppFont;
+
+  /// 当前选中的自定义字体文件。系统字体或尚未导入时为 null。
+  static File? get selectedCustomFontFile {
+    final family = Pref.appFont;
+    final filePath = family == null ? null : customFonts[family];
+    if (filePath == null || filePath.isEmpty) return null;
+    final file = File(filePath);
+    return file.existsSync() ? file : null;
+  }
+
+  /// 把数据包里的单个字体写入导入池，并返回字体族名。
+  static Future<String?> importArchivedFont(List<int> bytes) async {
+    final dir = Directory(_kFontDir);
+    if (!dir.existsSync()) {
+      await dir.create(recursive: true);
+    }
+    final tmp = File(
+      path.join(
+        _kFontDir,
+        '.archive-${DateTime.now().microsecondsSinceEpoch}.ttf',
+      ),
+    );
+    var consumed = false;
+    try {
+      await tmp.writeAsBytes(bytes, flush: true);
+      final hash = await _hashFile(tmp);
+      if (hash == null) return null;
+      final family = _familyOf(hash);
+      final name = await _resolveName(tmp.path, kFontName);
+      final existing = customFonts[family];
+      if (existing != null && File(existing).existsSync()) {
+        return family;
+      }
+      final saveTo = path.join(_kFontDir, '$hash.ttf');
+      await _deleteFile(File(saveTo));
+      await tmp.rename(saveTo);
+      consumed = true;
+      customFonts[family] = saveTo;
+      _customFontNames[family] = name;
+      await _saveFonts();
+      return family;
+    } finally {
+      if (!consumed) await _deleteFile(tmp);
+    }
+  }
 
   /// 字体族名 → 从字体文件解析出的显示名
   static final _customFontNames = Pref.customAppFontNames;

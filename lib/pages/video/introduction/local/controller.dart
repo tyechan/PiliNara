@@ -1,13 +1,17 @@
+import 'dart:async' show unawaited;
+
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
-import 'package:PiliPlus/models_new/download/download_collection.dart';
+import 'package:PiliPlus/models_new/download/download_playback.dart';
+import 'package:PiliPlus/models_new/video/video_detail/episode.dart';
 import 'package:PiliPlus/models_new/video/video_detail/stat_detail.dart';
 import 'package:PiliPlus/pages/common/common_intro_controller.dart';
-import 'package:PiliPlus/services/download/download_collection_service.dart';
-import 'package:PiliPlus/services/download/download_service.dart';
+import 'package:PiliPlus/services/download/download_library_service.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_repeat.dart';
 import 'package:PiliPlus/services/service_locator.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
-import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart';
+import 'package:PiliPlus/utils/scroll_offset_helper.dart';
+import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart'
+    show ExtendedNestedScrollController;
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:get/get.dart';
@@ -40,15 +44,15 @@ class LocalIntroController extends CommonIntroController {
   @override
   bool get isShowOnlineTotal => false;
 
-  late final Set<String> aidSet = {};
-
   // 是否正在进入应用内小窗
   bool isEnteringPip = false;
 
   @override
+  void onChangeEpisode(BaseEpisodeItem episode) => throw UnimplementedError();
+
+  @override
   void onClose() {
     if (isEnteringPip) return;
-    aidSet.clear();
     super.onClose();
   }
 
@@ -56,25 +60,25 @@ class LocalIntroController extends CommonIntroController {
   void onInit() {
     super.onInit();
     videoDetail.value.title = videoDetailCtr.args['title'];
-    final downloadService = Get.find<DownloadService>();
-    final collectionService = Get.find<DownloadCollectionService>();
-    final playContext = DownloadVideoPlayContext.fromArguments(
-      videoDetailCtr.args,
+    unawaited(
+      _initPlaylist(
+        Get.find<DownloadLibraryService>(),
+        DownloadVideoPlayContext.fromArguments(videoDetailCtr.args),
+      ),
     );
-    final list = switch (playContext?.scope) {
-      DownloadPlaylistScope.folder => collectionService.resolveFolderEntries(
-        playContext!.folderId!,
-        downloadService.downloadList,
-      ),
-      DownloadPlaylistScope.all => collectionService.resolveAllEntries(
-        downloadService.downloadList,
-      ),
-      null => List<BiliDownloadEntryInfo>.from(downloadService.downloadList)
-        ..sort((a, b) => b.timeUpdateStamp.compareTo(a.timeUpdateStamp)),
-    };
-    for (final entry in list) {
-      aidSet.add(entry.pageId);
+  }
+
+  /// 播放列表直接取缓存库的分组结果：带合集上下文时只放该合集，否则放全部
+  /// 缓存；顺序都是 合集 → 视频/分P 页 → 分P序号，且只含已缓存完成的条目。
+  Future<void> _initPlaylist(
+    DownloadLibraryService libraryService,
+    DownloadVideoPlayContext? playContext,
+  ) async {
+    await libraryService.waitForInitialization;
+    if (isClosed) {
+      return;
     }
+    final list = libraryService.resolvePlaylist(playContext);
     this.list.value = list;
     final currCid = videoDetailCtr.cid.value;
     final index = list.indexWhere((e) => e.cid == currCid);
@@ -84,15 +88,31 @@ class LocalIntroController extends CommonIntroController {
     }
     if (this.index.value != 0) {
       SchedulerBinding.instance.addPostFrameCallback((_) {
+        final (double offset, double remain) = calcFixedItemOffset(
+          index: index,
+          itemCount: list.length,
+        );
         try {
           final state = videoDetailCtr.scrollKey.currentState;
           if (state != null && state.mounted) {
-            (state.innerController as ExtendedNestedScrollController)
-                .nestedPositions
-                .first
-                .localJumpTo(_offset);
+            final position =
+                (state.innerController as ExtendedNestedScrollController)
+                    .nestedPositions
+                    .first;
+            final adjustOffset = adjustScrollOffset(
+              offset: offset,
+              remain: remain,
+              viewportDimension: position.viewportDimension,
+            );
+            position.localJumpTo(adjustOffset);
           } else if (videoDetailCtr.introScrollCtr?.hasClients ?? false) {
-            videoDetailCtr.introScrollCtr!.jumpTo(_offset);
+            final position = videoDetailCtr.introScrollCtr!.position;
+            final adjustOffset = adjustScrollOffset(
+              offset: offset,
+              remain: remain,
+              viewportDimension: position.viewportDimension,
+            );
+            position.jumpTo(adjustOffset);
           }
         } catch (_) {
           if (kDebugMode) rethrow;
@@ -102,7 +122,6 @@ class LocalIntroController extends CommonIntroController {
   }
 
   final index = (-1).obs;
-  double get _offset => index * 112 + 7 - 35;
   final list = RxList<BiliDownloadEntryInfo>();
 
   @override

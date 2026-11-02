@@ -14,6 +14,7 @@ class BottomControl extends StatelessWidget {
     super.key,
     required this.maxWidth,
     required this.isFullScreen,
+    required this.animCtr,
     required this.controller,
     required this.buildBottomControl,
     required this.videoDetailController,
@@ -22,6 +23,7 @@ class BottomControl extends StatelessWidget {
 
   final double maxWidth;
   final bool isFullScreen;
+  final AnimationController animCtr;
   final PlPlayerController controller;
   final ValueGetter<Widget> buildBottomControl;
   final VideoDetailController videoDetailController;
@@ -38,15 +40,37 @@ class BottomControl extends StatelessWidget {
     controller.updateDesktopProgressPreviewFromDrag(duration.timeStamp);
     if (!controller.isFileSource && controller.showSeekPreview) {
       controller.updatePreviewIndex(duration.seconds);
+      if (controller.hoverDx != null) {
+        controller.hoverDx = duration.localPosition.dx;
+      }
     }
     controller.seekPosition.value = duration.seconds;
   }
 
   void onSeek(int milliseconds) {
     controller
+      ..hoverDx = null
       ..position.value = milliseconds ~/ 1000
       ..onSeekEnd()
       ..seekTo(Duration(milliseconds: milliseconds), isSeek: false);
+  }
+
+  void _onHover(double dx, int seconds) {
+    if (animCtr.isAnimating) return;
+    controller
+      ..hoverDx = dx
+      ..seekPosition.value = seconds
+      ..updatePreviewIndex(seconds);
+  }
+
+  void _onExit() {
+    if (controller.isSeeking.value || controller.hoverDx == null) {
+      return;
+    }
+    controller
+      ..hoverDx = null
+      ..showPreview.value = false
+      ..hideTaskControls();
   }
 
   @override
@@ -58,6 +82,11 @@ class BottomControl extends StatelessWidget {
         : colorScheme.primary;
     final thumbGlowColor = primary.withAlpha(80);
     final bufferedBarColor = primary.withValues(alpha: 0.4);
+
+    final enableHover =
+        PlatformUtils.isDesktop &&
+        controller.showSeekPreview &&
+        !controller.isFileSource;
 
     return Padding(
       padding: const .symmetric(horizontal: 10, vertical: 12),

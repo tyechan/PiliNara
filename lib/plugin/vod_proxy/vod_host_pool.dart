@@ -1,5 +1,6 @@
 import 'dart:math' show Random;
 
+import 'package:PiliPlus/plugin/vod_proxy/vod_host_health.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
@@ -23,6 +24,7 @@ class VodHostStat {
   int chunkErrors = 0;
   final List<DateTime> recentTimeouts = <DateTime>[];
   DateTime? blacklistedUntil;
+  DateTime? bannedAt;
   String? lastBanReason;
 
   bool get isOverseas => VodHostPool.isOverseasHost(host);
@@ -81,14 +83,16 @@ class VodHostPool {
     return _hosts.where((h) => h.blacklistedUntil == null).toList();
   }
 
-  VodHostStat? get preferred {
-    final open = _ranked(available);
+  VodHostStat? preferredHost({String? kind}) {
+    final open = _ranked(available, kind: kind);
     if (open.isEmpty) return _hosts.isEmpty ? null : _hosts.first;
     return open.first;
   }
 
-  List<VodHostStat> topHosts({int k = 3}) {
-    final ranked = _ranked(available);
+  VodHostStat? get preferred => preferredHost();
+
+  List<VodHostStat> topHosts({int k = 3, String? kind}) {
+    final ranked = _ranked(available, kind: kind);
     if (ranked.isEmpty) return const [];
     return ranked.take(k).toList();
   }
@@ -104,8 +108,15 @@ class VodHostPool {
 
   /// Spread workers across the 2–3 best hosts, weighted by measured throughput.
   /// Never returns a banned host unless [allowBanned] and nothing else is left.
-  String? pickUrl({String? avoidHost, bool allowBanned = false}) {
-    var open = available;
+  String? pickUrl({
+    String? avoidHost,
+    bool allowBanned = false,
+    String? kind,
+  }) {
+    var open = available.where((h) {
+      if (allowBanned) return true;
+      return !VodHostHealth.instance.isBanned(h.host);
+    }).toList();
     if (open.isEmpty) {
       if (allowBanned && _hosts.isNotEmpty) {
         open = [..._hosts];
@@ -127,7 +138,7 @@ class VodHostPool {
         }
       }
     }
-    final top = _ranked(open).take(3).toList();
+    final top = _ranked(open, kind: kind).take(3).toList();
     if (top.isEmpty) return open.first.url;
     if (top.every((h) => h.emaBps <= 0)) {
       return top[_rotate++ % top.length].url;
@@ -147,11 +158,11 @@ class VodHostPool {
     return top.last.url;
   }
 
-  List<VodHostStat> _ranked(List<VodHostStat> open) {
+  List<VodHostStat> _ranked(List<VodHostStat> open, {String? kind}) {
     final copy = [...open];
     copy.sort((a, b) {
-      final sa = _score(a);
-      final sb = _score(b);
+      final sa = _score(a, kind: kind);
+      final sb = _score(b, kind: kind);
       final cmp = sb.compareTo(sa);
       if (cmp != 0) return cmp;
       return a.errors.compareTo(b.errors);
@@ -159,12 +170,24 @@ class VodHostPool {
     return copy;
   }
 
-  double _score(VodHostStat h) {
+  double _score(VodHostStat h, {String? kind}) {
     var score = h.emaBps > 0 ? h.emaBps : 1.0;
     if (h.isOverseas && !overseasWins) {
       score *= 0.2;
     }
+    if (kind == 'video' && VodHostHealth.instance.isVideoSlow(h.host)) {
+      score *= 0.05;
+    }
     return score;
+  }
+
+  /// Session-local drop (akamai 403, etc.) — no loud ban line.
+  void dropQuiet(String url, {required String reason}) {
+    final stat = _find(url);
+    if (stat == null) return;
+    stat.blacklistedUntil = DateTime.now().add(const Duration(minutes: 30));
+    stat.bannedAt = DateTime.now();
+    stat.lastBanReason = 'skip-$reason';
   }
 
   VodHostStat? _find(String url) {
@@ -228,12 +251,14 @@ class VodHostPool {
     final windowN = stat.recentTimeouts.length;
     if (stat.blacklistedUntil != null) return false;
     if (stat.consecutiveErrors >= banAfterErrors || windowN >= banAfterErrors) {
+      stat.bannedAt = now;
       stat.blacklistedUntil = now.add(ban);
       final why = windowN >= banAfterErrors
           ? '$reason n=$windowN/30s'
           : '$reason n=${stat.consecutiveErrors}';
       stat.lastBanReason = why;
       banReasons.add('${stat.host}:$why');
+      VodHostHealth.instance.noteBan(stat.host);
       VodProxyLog.log(
         'ban host=${stat.host} reason=$why cooldown=${ban.inSeconds}s',
       );
@@ -257,11 +282,19 @@ class VodHostPool {
     final now = DateTime.now();
     for (final h in _hosts) {
       final until = h.blacklistedUntil;
-      if (until != null && !now.isBefore(until)) {
+      if (until == null) continue;
+      final started = h.bannedAt;
+      if (started != null &&
+          now.difference(started) < defaultBan) {
+        continue;
+      }
+      if (!now.isBefore(until)) {
+        final lived = started == null ? until.difference(now).inSeconds.abs() : now.difference(started).inSeconds;
         h.blacklistedUntil = null;
+        h.bannedAt = null;
         h.consecutiveErrors = 0;
         unbanCount++;
-        VodProxyLog.log('unban host=${h.host} retry');
+        VodProxyLog.log('unban host=${h.host} retry after=${lived}s');
       }
     }
   }
@@ -270,8 +303,10 @@ class VodHostPool {
   String? preferNext() {
     final cur = preferred;
     if (cur == null) return null;
+    cur.bannedAt = DateTime.now();
     cur.blacklistedUntil = DateTime.now().add(const Duration(seconds: 30));
     cur.lastBanReason = 'prefer-next';
+    VodHostHealth.instance.noteBan(cur.host);
     banReasons.add('${cur.host}:prefer-next');
     VodProxyLog.log('ban host=${cur.host} reason=prefer-next n=1 cooldown=30s');
     onBan?.call(cur.host);

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:PiliPlus/plugin/pl_player/models/data_source.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_host_pool.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_proxy_log.dart';
@@ -17,6 +18,8 @@ class _MockCdn {
     this.timeoutFor = const Duration(seconds: 2),
     this.hangEveryMatching = false,
     this.hangAfterStart = false,
+    this.slowAt,
+    this.slowFor = const Duration(seconds: 7),
     this.advertiseHost = '127.0.0.1',
   });
 
@@ -27,6 +30,8 @@ class _MockCdn {
   final Duration timeoutFor;
   final bool hangEveryMatching;
   final bool hangAfterStart;
+  final int? slowAt;
+  final Duration slowFor;
   final String advertiseHost;
   HttpServer? _server;
   int resets = 0;
@@ -75,13 +80,16 @@ class _MockCdn {
         final hangThis = hangAfterStart
             ? start > 0
             : timeoutAt != null &&
-                start == timeoutAt &&
-                (hangEveryMatching || timeouts < 1);
+                  start == timeoutAt &&
+                  (hangEveryMatching || timeouts < 1);
         if (hangThis) {
           timeouts++;
           await Future<void>.delayed(timeoutFor);
           (await response.detachSocket()).destroy();
           return;
+        }
+        if (slowAt != null && start == slowAt) {
+          await Future<void>.delayed(slowFor);
         }
         var sent = 0;
         const step = 8 * 1024;
@@ -116,13 +124,23 @@ class _MockCdn {
   }
 }
 
-Future<Uint8List> _fetchAll(String url) async {
+Future<Uint8List> _fetchAll(
+  String url, {
+  Duration timeout = const Duration(seconds: 15),
+  int start = 0,
+}) async {
   final client = HttpClient();
   try {
     final req = await client.getUrl(Uri.parse(url));
-    final resp = await req.close().timeout(const Duration(seconds: 15));
+    if (start > 0) {
+      req.headers.set(HttpHeaders.rangeHeader, 'bytes=$start-');
+    }
+    final resp = await req.close().timeout(timeout);
+    if (resp.statusCode >= 400) {
+      throw HttpException('http ${resp.statusCode}', uri: Uri.parse(url));
+    }
     final builder = BytesBuilder(copy: false);
-    await for (final chunk in resp.timeout(const Duration(seconds: 15))) {
+    await for (final chunk in resp.timeout(timeout)) {
       builder.add(chunk);
     }
     return builder.takeBytes();
@@ -204,62 +222,99 @@ void main() {
     );
   }, timeout: const Timeout(Duration(seconds: 25)));
 
-  test('banned host is not retried for the cursor chunk; other host serves it', () async {
-    final bad = _MockCdn(
+  test('slow chunk longer than the old ffmpeg timeout still delivers the full file', () async {
+    final cdn = _MockCdn(
       payload,
-      timeoutAt: 32 * 1024,
-      timeoutFor: const Duration(seconds: 5),
-      hangEveryMatching: true,
-      advertiseHost: '127.0.0.1',
+      slowAt: 32 * 1024,
+      slowFor: const Duration(seconds: 7),
     );
-    final good = _MockCdn(payload, advertiseHost: 'localhost');
-    await bad.start();
-    await good.start();
-    addTearDown(bad.stop);
-    addTearDown(good.stop);
+    await cdn.start();
+    addTearDown(cdn.stop);
     final proxyUrl = await VodHttpProxy.instance.openRaw(
-      bad.url,
-      extras: [good.url],
+      cdn.url,
       chunkSize: 16 * 1024,
       windowBytes: 64 * 1024,
-      workers: 2,
-      attemptTimeout: const Duration(seconds: 4),
-      fetchBudget: const Duration(seconds: 10),
-      cursorWatchdog: const Duration(seconds: 8),
+      workers: 3,
+      // CDN body is delayed 7s — longer than the old ~5s lavf timeout —
+      // but the proxy must keep the client socket open and finish.
+      attemptTimeout: const Duration(seconds: 12),
+      fetchBudget: const Duration(seconds: 25),
+      cursorWatchdog: const Duration(seconds: 20),
     );
     expect(proxyUrl, isNotNull);
-    final session = VodHttpProxy.instance.debugSessions.first;
-    final fetch = _fetchAll(proxyUrl!).timeout(const Duration(seconds: 20));
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
-      session.pool.recordFailure(bad.url, reason: 'TimeoutException');
-    }
-    final got = await fetch;
+    final sw = Stopwatch()..start();
+    final got = await _fetchAll(
+      proxyUrl!,
+      timeout: const Duration(seconds: 30),
+    ).timeout(const Duration(seconds: 35));
     expect(got, payload);
-    expect(good.requests, greaterThan(0));
+    expect(sw.elapsed, greaterThan(const Duration(seconds: 6)));
     expect(
-      VodProxyLog.memoryLines.any((l) => l.contains('ban host=127.0.0.1')),
-      isTrue,
-    );
-    expect(
-      VodProxyLog.memoryLines.any((l) => l.contains('requeue id=')),
-      isTrue,
-    );
-    final afterBan = VodProxyLog.memoryLines.skipWhile(
-      (l) => !l.contains('ban host=127.0.0.1'),
-    );
-    expect(
-      afterBan.where(
-        (l) =>
-            l.contains('retry id=') &&
-            l.contains('range=bytes 32768-49151') &&
-            l.contains('from=127.0.0.1') &&
-            !l.contains('kicked'),
-      ),
+      VodProxyLog.memoryLines.where((l) => l.contains('abort id=')),
       isEmpty,
-      reason: 'cursor chunk must not keep retrying the banned host',
     );
-  }, timeout: const Timeout(Duration(seconds: 25)));
+  }, timeout: const Timeout(Duration(seconds: 45)));
+
+  test(
+    'banned host is not retried for the cursor chunk; other host serves it',
+    () async {
+      final bad = _MockCdn(
+        payload,
+        timeoutAt: 32 * 1024,
+        timeoutFor: const Duration(seconds: 5),
+        hangEveryMatching: true,
+        advertiseHost: '127.0.0.1',
+      );
+      final good = _MockCdn(payload, advertiseHost: 'localhost');
+      await bad.start();
+      await good.start();
+      addTearDown(bad.stop);
+      addTearDown(good.stop);
+      final proxyUrl = await VodHttpProxy.instance.openRaw(
+        bad.url,
+        extras: [good.url],
+        chunkSize: 16 * 1024,
+        windowBytes: 64 * 1024,
+        workers: 2,
+        attemptTimeout: const Duration(seconds: 4),
+        fetchBudget: const Duration(seconds: 10),
+        cursorWatchdog: const Duration(seconds: 8),
+      );
+      expect(proxyUrl, isNotNull);
+      final session = VodHttpProxy.instance.debugSessions.first;
+      final fetch = _fetchAll(proxyUrl!).timeout(const Duration(seconds: 20));
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+        session.pool.recordFailure(bad.url, reason: 'TimeoutException');
+      }
+      final got = await fetch;
+      expect(got, payload);
+      expect(good.requests, greaterThan(0));
+      expect(
+        VodProxyLog.memoryLines.any((l) => l.contains('ban host=127.0.0.1')),
+        isTrue,
+      );
+      expect(
+        VodProxyLog.memoryLines.any((l) => l.contains('requeue id=')),
+        isTrue,
+      );
+      final afterBan = VodProxyLog.memoryLines.skipWhile(
+        (l) => !l.contains('ban host=127.0.0.1'),
+      );
+      expect(
+        afterBan.where(
+          (l) =>
+              l.contains('retry id=') &&
+              l.contains('range=bytes 32768-49151') &&
+              l.contains('from=127.0.0.1') &&
+              !l.contains('kicked'),
+        ),
+        isEmpty,
+        reason: 'cursor chunk must not keep retrying the banned host',
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 25)),
+  );
 
   test('ffmpeg copies a real MP4 through a mid-chunk CDN timeout', () async {
     final ffmpeg = _which('ffmpeg');
@@ -422,25 +477,32 @@ void main() {
     expect(err, isNot(contains('Failed to open http://127.0.0.1')));
   }, timeout: const Timeout(Duration(seconds: 40)));
 
-  test('re-reading the same file does not inflate unique served bytes', () async {
-    final cdn = _MockCdn(payload);
-    await cdn.start();
-    addTearDown(cdn.stop);
-    final proxyUrl = await VodHttpProxy.instance.openRaw(
-      cdn.url,
-      chunkSize: 16 * 1024,
-      windowBytes: 64 * 1024,
-      workers: 3,
-    );
-    expect(proxyUrl, isNotNull);
-    await _fetchAll(proxyUrl!);
-    await _fetchAll(proxyUrl);
-    final session = VodHttpProxy.instance.debugSessions.first;
-    expect(session.uniqueServedBytes, lessThanOrEqualTo(payload.length));
-    expect(session.uniqueFetchedBytes, lessThanOrEqualTo(payload.length + 16 * 1024));
-  }, timeout: const Timeout(Duration(seconds: 25)));
+  test(
+    're-reading the same file does not inflate unique served bytes',
+    () async {
+      final cdn = _MockCdn(payload);
+      await cdn.start();
+      addTearDown(cdn.stop);
+      final proxyUrl = await VodHttpProxy.instance.openRaw(
+        cdn.url,
+        chunkSize: 16 * 1024,
+        windowBytes: 64 * 1024,
+        workers: 3,
+      );
+      expect(proxyUrl, isNotNull);
+      await _fetchAll(proxyUrl!);
+      await _fetchAll(proxyUrl);
+      final session = VodHttpProxy.instance.debugSessions.first;
+      expect(session.uniqueServedBytes, lessThanOrEqualTo(payload.length));
+      expect(
+        session.uniqueFetchedBytes,
+        lessThanOrEqualTo(payload.length + 16 * 1024),
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 25)),
+  );
 
-  test('pause flushes session_end without closing', () async {
+  test('pause logs session_pause and stops stats until resume', () async {
     final cdn = _MockCdn(payload);
     await cdn.start();
     addTearDown(cdn.stop);
@@ -451,25 +513,151 @@ void main() {
     );
     expect(proxyUrl, isNotNull);
     await _fetchAll(proxyUrl!);
+    final session = VodHttpProxy.instance.debugSessions.first;
     VodHttpProxy.instance.flushSessionEnd(reason: 'pause');
     expect(VodHttpProxy.instance.hasActiveSession, isTrue);
+    expect(session.statsPaused, isTrue);
+    expect(session.statsRunning, isFalse);
     expect(
-      VodProxyLog.memoryLines.where((l) => l.contains('session_end')).length,
-      1,
+      VodProxyLog.memoryLines.where((l) => l.contains('session_pause')),
+      isNotEmpty,
+    );
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('session_end')),
+      isEmpty,
+    );
+    final statsBefore = VodProxyLog.memoryLines
+        .where((l) => l.contains('stats id='))
+        .length;
+    session.startStats();
+    expect(session.statsRunning, isFalse);
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('stats id=')).length,
+      statsBefore,
     );
     VodHttpProxy.instance.flushSessionEnd(reason: 'pause');
     expect(
-      VodProxyLog.memoryLines.where((l) => l.contains('session_end')).length,
+      VodProxyLog.memoryLines.where((l) => l.contains('session_pause')).length,
       1,
     );
+    VodHttpProxy.instance.resumeStats();
+    expect(
+      VodProxyLog.memoryLines.where((l) => l.contains('session_resume')),
+      isNotEmpty,
+    );
+    expect(session.statsPaused, isFalse);
     VodHttpProxy.instance.closeAll(reason: 'dispose');
     expect(
       VodProxyLog.memoryLines.where((l) => l.contains('session_end')).length,
-      2,
+      1,
     );
   }, timeout: const Timeout(Duration(seconds: 25)));
 
-  test('closeAll stops the session and writes session_end', () async {
+  test('backward seek within the back-buffer does not re-fetch', () async {
+    final big = Uint8List.fromList(
+      List<int>.generate(160 * 1024, (i) => (i * 17 + 3) & 0xff),
+    );
+    final cdn = _MockCdn(big);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      windowBytes: 32 * 1024,
+      backBufferBytes: 96 * 1024,
+      workers: 3,
+    );
+    expect(proxyUrl, isNotNull);
+    expect(await _fetchAll(proxyUrl!), big);
+    final session = VodHttpProxy.instance.debugSessions.first;
+    final netAfterForward = session.bytesNet;
+    final fetchedAfterForward = session.uniqueFetchedBytes;
+    final mid = await _fetchAll(proxyUrl, start: 48 * 1024);
+    expect(mid, big.sublist(48 * 1024));
+    expect(session.uniqueFetchedBytes, fetchedAfterForward);
+    expect(session.bytesNet, netAfterForward);
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test(
+    'backward seek inside the cached range adds zero network bytes',
+    () async {
+      final big = Uint8List.fromList(
+        List<int>.generate(3 * 1024 * 1024, (i) => (i * 13 + 5) & 0xff),
+      );
+      final cdn = _MockCdn(big);
+      await cdn.start();
+      addTearDown(cdn.stop);
+      final proxyUrl = await VodHttpProxy.instance.openRaw(
+        cdn.url,
+        chunkSize: 64 * 1024,
+        windowBytes: 128 * 1024,
+        backBufferBytes: 2 * 1024 * 1024,
+        workers: 4,
+      );
+      expect(proxyUrl, isNotNull);
+      expect(await _fetchAll(proxyUrl!), big);
+      final session = VodHttpProxy.instance.debugSessions.first;
+      final netAfterForward = session.bytesNet;
+      final fetchedAfterForward = session.uniqueFetchedBytes;
+      expect(
+        await _fetchAll(proxyUrl, start: 2500 * 1024),
+        big.sublist(2500 * 1024),
+      );
+      expect(session.bytesNet, netAfterForward);
+      expect(session.uniqueFetchedBytes, fetchedAfterForward);
+      expect(
+        await _fetchAll(proxyUrl, start: 1200 * 1024),
+        big.sublist(1200 * 1024),
+      );
+      expect(session.bytesNet, netAfterForward);
+      expect(session.uniqueFetchedBytes, fetchedAfterForward);
+    },
+    timeout: const Timeout(Duration(seconds: 40)),
+  );
+
+  test(
+    'kicking a banned host does not restart every in-flight request',
+    () async {
+      final bad = _MockCdn(
+        payload,
+        timeoutAt: 16 * 1024,
+        timeoutFor: const Duration(seconds: 3),
+        hangEveryMatching: true,
+        advertiseHost: '127.0.0.1',
+      );
+      final good = _MockCdn(payload, advertiseHost: 'localhost');
+      await bad.start();
+      await good.start();
+      addTearDown(bad.stop);
+      addTearDown(good.stop);
+      final proxyUrl = await VodHttpProxy.instance.openRaw(
+        bad.url,
+        extras: [good.url],
+        chunkSize: 16 * 1024,
+        windowBytes: 64 * 1024,
+        workers: 4,
+        attemptTimeout: const Duration(seconds: 4),
+        fetchBudget: const Duration(seconds: 12),
+      );
+      expect(proxyUrl, isNotNull);
+      final session = VodHttpProxy.instance.debugSessions.first;
+      final fetch = _fetchAll(proxyUrl!).timeout(const Duration(seconds: 20));
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      for (var i = 0; i < VodHostPool.banAfterErrors; i++) {
+        session.pool.recordFailure(bad.url, reason: 'TimeoutException');
+      }
+      final got = await fetch;
+      expect(got, payload);
+      expect(
+        VodProxyLog.memoryLines.where((l) => l.contains('reason=kicked')),
+        isEmpty,
+      );
+      expect(session.bytesNet, lessThan(session.uniqueFetchedBytes * 2));
+    },
+    timeout: const Timeout(Duration(seconds: 25)),
+  );
+
+  test('recently closed sessions stay resolvable for a few seconds', () async {
     final cdn = _MockCdn(payload);
     await cdn.start();
     addTearDown(cdn.stop);
@@ -480,17 +668,136 @@ void main() {
     );
     expect(proxyUrl, isNotNull);
     await _fetchAll(proxyUrl!);
-    VodHttpProxy.instance.closeAll(reason: 'media-change');
+    VodHttpProxy.instance.closeAll(reason: 'new-wrap');
+    expect(VodHttpProxy.instance.hasActiveSession, isFalse);
+    final got = await _fetchAll(proxyUrl);
+    expect(got, payload);
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('session_end')),
+      isFalse,
+    );
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('closeAll dispose stops the session and writes session_end', () async {
+    final cdn = _MockCdn(payload);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    await _fetchAll(proxyUrl!);
+    VodHttpProxy.instance.closeAll(reason: 'dispose');
     expect(VodHttpProxy.instance.hasActiveSession, isFalse);
     expect(
       VodProxyLog.memoryLines.any((l) => l.contains('session_end')),
       isTrue,
     );
     expect(
-      VodProxyLog.memoryLines.any((l) => l.contains('close reason=media-change')),
+      VodProxyLog.memoryLines.any((l) => l.contains('close reason=dispose')),
+      isTrue,
+    );
+    await expectLater(_fetchAll(proxyUrl), throwsA(isA<HttpException>()));
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('lingering session is reclaimed by id after wrap parks it', () async {
+    final cdn = _MockCdn(payload);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    await _fetchAll(proxyUrl!);
+    VodHttpProxy.instance.closeAll(reason: 'new-wrap');
+    expect(VodHttpProxy.instance.hasActiveSession, isFalse);
+    final got = await _fetchAll(proxyUrl);
+    expect(got, payload);
+    expect(VodHttpProxy.instance.hasActiveSession, isTrue);
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('session-reclaim')),
       isTrue,
     );
   }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test(
+    'orphan session with no client is closed and logs session_end',
+    () async {
+      final cdn = _MockCdn(payload);
+      await cdn.start();
+      addTearDown(cdn.stop);
+      final proxyUrl = await VodHttpProxy.instance.openRaw(
+        cdn.url,
+        chunkSize: 16 * 1024,
+        workers: 2,
+      );
+      expect(proxyUrl, isNotNull);
+      await _fetchAll(proxyUrl!);
+      VodHttpProxy.instance.closeAll(reason: 'new-wrap');
+      expect(VodHttpProxy.instance.hasActiveSession, isFalse);
+      VodHttpProxy.instance.orphanAfter = const Duration(milliseconds: 200);
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      expect(VodHttpProxy.instance.debugLingering, isEmpty);
+      expect(VodHttpProxy.instance.hasActiveSession, isFalse);
+      expect(
+        VodProxyLog.memoryLines.any(
+          (l) => l.contains('session_end') && l.contains('reason=orphan'),
+        ),
+        isTrue,
+      );
+    },
+    timeout: const Timeout(Duration(seconds: 25)),
+  );
+
+  test('forceDirectOnce closes leftover sessions with session_end', () async {
+    final cdn = _MockCdn(payload);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    await _fetchAll(proxyUrl!);
+    expect(VodHttpProxy.instance.hasActiveSession, isTrue);
+    VodHttpProxy.instance.forceDirectOnce();
+    expect(VodHttpProxy.instance.hasActiveSession, isFalse);
+    expect(
+      VodProxyLog.memoryLines.any(
+        (l) => l.contains('session_end') && l.contains('reason=force-direct'),
+      ),
+      isTrue,
+    );
+    await expectLater(_fetchAll(proxyUrl), throwsA(isA<HttpException>()));
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test(
+    'concurrent wrap calls are serialized and do not drop the live id',
+    () async {
+      final cdn = _MockCdn(payload, advertiseHost: 'localhost');
+      await cdn.start();
+      addTearDown(cdn.stop);
+      final source = NetworkSource(
+        videoSource: cdn.url,
+        audioSource: null,
+      );
+      final first = VodHttpProxy.instance.wrap(source);
+      final second = VodHttpProxy.instance.wrap(source);
+      final results = await Future.wait([first, second]);
+      expect(results.whereType<NetworkSource>().length, 2);
+      expect(VodHttpProxy.instance.debugSessions.length, 1);
+      final live = results.last;
+      expect(live, isNotNull);
+      final got = await _fetchAll(live!.videoSource);
+      expect(got, payload);
+    },
+    timeout: const Timeout(Duration(seconds: 25)),
+  );
 
   test('direct CDN URL still plays (toggle-off path)', () async {
     final cdn = _MockCdn(payload);
