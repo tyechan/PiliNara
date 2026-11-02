@@ -44,16 +44,16 @@ jobs:
         shell: pwsh
         run: lib/scripts/patch.ps1 windows
 
-      # 新增步骤：在 Patch 之后回滚指定 Commit
-      - name: Revert specified commit
+      # 重新指向 media-kit 的 upstream 分支并回退 ee148aa 的播放器改动（新版 libmpv）
+      - name: Apply NewLibmpv Patch & update dependencies
+        shell: pwsh
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git revert --no-edit ee148aa640e2da807c3048fde40eff9094ff897a
+          git apply lib/scripts/newlibmpv.patch
+          flutter pub get
 
       - name: Build Windows
         run: |
-          fastforge package --platform windows --targets exe --flutter-build-args="dart-define-from-file=pili_release.json,no-pub" --skip-clean
+          fastforge package --platform windows --targets exe --flutter-build-args="dart-define-from-file=pili_release.json" --skip-clean
 
       # 产物重命名为含有 NewLibmpv 后缀
       - name: Prepare Upload

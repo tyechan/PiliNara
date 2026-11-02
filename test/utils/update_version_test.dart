@@ -13,6 +13,20 @@ void main() {
   test('parses 10-digit versionCode from short fork names', () {
     expect(
       Update.parseRemoteVersionCode(
+        tagName: 'v2.6.1.1-1018b+abc1234',
+        name: 'PiliPala 2.6.1.1-1018b+abc1234 (2026101802)',
+      ),
+      2026101802,
+    );
+    expect(
+      Update.parseRemoteVersionCode(
+        tagName: 'v2.1.6-1017a+abc1234',
+        name: 'PiliPala 2.1.6-1017a+abc1234 (2026101701)',
+      ),
+      2026101701,
+    );
+    expect(
+      Update.parseRemoteVersionCode(
         tagName: 'v2.1.6-1016c+abc1234',
         name: 'PiliPala 2.1.6-1016c+abc1234 (2026101603)',
       ),
@@ -69,19 +83,36 @@ void main() {
 
   test('About displayVersion is a short one-liner', () {
     expect(BuildConfig.displayVersion.length, lessThanOrEqualTo(24));
-    expect(BuildConfig.displayVersion, contains('·'));
+    expect(BuildConfig.displayVersion, '2.6.1.1 · 1102 · dev');
     expect(BuildConfig.versionName.length, lessThanOrEqualTo(16));
-    expect(BuildConfig.versionName, '2.1.6-1016c');
-    expect(VodProxyLog.bootLine, contains('2.1.6-1016c'));
-    expect(VodProxyLog.bootLine, contains('2026101603'));
+    expect(BuildConfig.versionName, '2.6.1.1-1102a');
+    expect(VodProxyLog.bootLine, contains('2.6.1.1-1102a'));
+    expect(VodProxyLog.bootLine, contains('2026110201'));
+    expect(BuildConfig.displayVersion, contains('2.6.1.1 · 1102'));
+    expect(BuildConfig.displayVersion.split('\n'), hasLength(1));
     expect(VodProxyLog.safeTitle('audio2'), '-');
-    expect(VodProxyLog.safeTitle('https://upos-sz-mirrorali.bilivideo.com/a.m4s?deadline=1'), '-');
+    expect(
+      VodProxyLog.safeTitle(
+        'https://upos-sz-mirrorali.bilivideo.com/a.m4s?deadline=1',
+      ),
+      '-',
+    );
     expect(VodProxyLog.safeTitle('真正的标题'), '真正的标题');
-    expect(VodProxyLog.hostOnly('https://upos-sz-mirrorali.bilivideo.com/a.m4s?e=1'), 'upos-sz-mirrorali.bilivideo.com');
+    expect(
+      VodProxyLog.hostOnly('https://upos-sz-mirrorali.bilivideo.com/a.m4s?e=1'),
+      'upos-sz-mirrorali.bilivideo.com',
+    );
     expect(VodProxyLog.hostOnly('http://127.0.0.1:9/video1'), '-');
   });
 
   test('isRemoteNewer compares versionCode only', () {
+    expect(
+      Update.isRemoteNewer(
+        localVersionCode: 2026101703,
+        remoteVersionCode: 2026101802,
+      ),
+      isTrue,
+    );
     expect(
       Update.isRemoteNewer(
         localVersionCode: 2026101502,

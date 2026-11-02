@@ -1,11 +1,11 @@
 abstract final class BuildConfig {
   static const int versionCode = int.fromEnvironment(
     'pili.code',
-    defaultValue: 2026101603,
+    defaultValue: 2026110201,
   );
   static const String versionName = String.fromEnvironment(
     'pili.name',
-    defaultValue: '2.1.6-1016c',
+    defaultValue: '2.6.1.1-1102a',
   );
 
   static const int buildTime = int.fromEnvironment('pili.time');
@@ -20,7 +20,7 @@ abstract final class BuildConfig {
     return hash.length <= 7 ? hash : hash.substring(0, 7);
   }
 
-  /// One-line About label, e.g. `2.1.6 · 1016 · 7e718a6`.
+  /// One-line About label, e.g. `2.6.1.1 · 1102 · 7e718a6`.
   static String get displayVersion {
     final parts = versionName.split('-');
     final base = parts.isNotEmpty ? parts.first : versionName;

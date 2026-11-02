@@ -15,7 +15,7 @@
 | 应用名 | `PiliPala`（debug 为 `PiliPala debug`） | `PiliNara` |
 | 包名 `applicationId` | `com.tychen.pilipala` | `com.example.pilinara` |
 | 应用内检查更新 | [tyechan/PiliNara Releases](https://github.com/tyechan/PiliNara/releases) | Starfallan 官方 Releases |
-| 版本号 | `2.1.6-MMDDa` + `versionCode=YYYYMMDDNN`（关于页一行显示） | `2.1.6-<commit>` + `git rev-list` |
+| 版本号 | `2.6.1.1-MMDDa` + `versionCode=YYYYMMDDNN`（关于页一行显示） | `2.1.6-<commit>` + `git rev-list` |
 | 点播加速 | 设置里有「多线程加速（实验）」 | 无 |
 
 **多线程加速（实验）**：应用内 `127.0.0.1` VOD 代理按 Range 并行拉流，可调连接数，带 host 池、节点耗时日志；探测失败或播放器打不开代理时回退直连。默认关闭，按需在播放设置里打开。
@@ -31,15 +31,16 @@
 
 ## 版本与更新
 
-- `versionName`：`2.1.6-MMDDa`（例如 `2.1.6-1016c`，不超过 16 字符）
-- 关于页一行：`2.1.6 · 1016 · <短哈希>`
-- `versionCode`：`YYYYMMDD` + 当日序号，例如 `2026101603`
-- Git 标签：`v2.1.6-1016c+<短哈希>`
+- `versionName`：`<上游版本>-MMDDa`（例如 `2.6.1.1-1018b`，不超过 16 字符）
+- 关于页一行：`2.6.1.1 · 1018 · <短哈希>`
+- `versionCode`：`YYYYMMDD` + 当日序号，例如 `2026101802`
+- Git 标签：`v2.6.1.1-1018b+<短哈希>`
+- `pubspec.yaml` 的 `version` 只能是 Dart semver（`2.6.1+2026101802`）。真正写进 APK、关于页和日志的是 `lib/build_config.dart` 里的 `2.6.1.1-1018b`，由 `build_fork.sh` 用 `--build-name` 传给 Flutter。
 - 应用内检查更新只看本仓库 Release，用 `versionCode` 比较，不再用官方构建时间。
 
 ## 如何同步上游
 
-官方发行版来自 **Starfallan/PiliNara**（例如 `2.1.6 [Arcane]` / `2b33fc0f7`）。PiliPlus 的改动通常已由官方合入。
+官方发行版来自 **Starfallan/PiliNara**（当前已合入 `2.6.1.1` / `874301cfd`）。PiliPlus 的改动通常已由官方合入。
 
 同步步骤（人工，不自动合）：
 
@@ -67,7 +68,9 @@ flutter test test/plugin/pl_player/player_controls_widget_test.dart \
 
 ```bash
 bash lib/scripts/build_fork.sh
-flutter build apk --release --split-per-abi --dart-define-from-file=pili_release.json
+flutter build apk --release --split-per-abi \
+  --build-name=2.6.1.1-1018b --build-number=2026101802 \
+  --dart-define-from-file=pili_release.json
 ```
 
 Release 签名需要 `android/key.properties` 指向专用 keystore。CI 从 GitHub Secrets 写入：
@@ -77,7 +80,7 @@ Release 签名需要 `android/key.properties` 指向专用 keystore。CI 从 Git
 - `KEY_ALIAS`
 - `KEY_PASSWORD`
 
-打 `v*-btr-proxy*` 标签会触发 Android Release 工作流。不要用上游的 `lib/scripts/build.ps1`（它会把 `versionCode` 改成 commit 计数）。
+打 `v2.*` 或 `v*-btr-proxy*` 标签会触发 Android Release 工作流。不要用上游的 `lib/scripts/build.ps1`（它会把 `versionCode` 改成 commit 计数）。
 
 ## 致谢与许可
 

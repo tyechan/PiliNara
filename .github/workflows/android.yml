@@ -4,7 +4,7 @@ on:
     push:
         tags:
             - "v*-btr-proxy*"
-            - "v2.1.6-*"
+            - "v2.*"
     pull_request:
         types:
             - opened
@@ -77,7 +77,7 @@ jobs:
               run: bash lib/scripts/build_fork.sh
 
             - name: flutter build apk
-              run: flutter build apk --release --split-per-abi --dart-define-from-file=pili_release.json --pub
+              run: flutter build apk --release --split-per-abi --build-name="${{ env.version_name }}" --build-number="${{ env.version_code }}" --dart-define-from-file=pili_release.json --pub
 
             - name: rename
               run: |
@@ -93,7 +93,9 @@ jobs:
               with:
                   tag_name: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
                   name: ${{ format('PiliPala {0} ({1})', env.version, env.version_code) }}
+                  body_path: .github/release_body.md
                   target_commitish: ${{ github.sha }}
+                  prerelease: true
                   files: |
                       PiliPala-*.apk
 

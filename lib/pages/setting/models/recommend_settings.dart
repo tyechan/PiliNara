@@ -4,6 +4,7 @@ import 'package:PiliPlus/models/common/rcmd_mode.dart';
 import 'package:PiliPlus/pages/rcmd/controller.dart';
 import 'package:PiliPlus/pages/setting/models/model.dart';
 import 'package:PiliPlus/pages/setting/widgets/select_dialog.dart';
+import 'package:PiliPlus/utils/accounts/account.dart';
 import 'package:PiliPlus/utils/global_data.dart';
 import 'package:PiliPlus/utils/login_utils.dart';
 import 'package:PiliPlus/utils/recommend_filter.dart';
@@ -28,7 +29,7 @@ List<SettingsModel> get recommendSettings => [
   NormalModel(
     title: 'buvid',
     leading: const Icon(CustomIcons.identifier_circle),
-    getSubtitle: () => LoginUtils.buvid,
+    getSubtitle: () => AnonymousAccount().buvid,
     onTap: _showBuvidDialog,
   ),
   SwitchModel(
@@ -252,7 +253,7 @@ Future<void> _showRcmdModeDialog(
 }
 
 void _showBuvidDialog(BuildContext context, VoidCallback setState) {
-  String buvid = LoginUtils.buvid;
+  String buvid = AnonymousAccount().buvid;
   showDialog(
     context: context,
     builder: (context) => AlertDialog(
@@ -267,7 +268,7 @@ void _showBuvidDialog(BuildContext context, VoidCallback setState) {
         TextButton(
           onPressed: () {
             Get.back();
-            Pref.buvid = LoginUtils.buvid = LoginUtils.generateBuvid();
+            AnonymousAccount().buvid = LoginUtils.generateBuvid();
             setState();
           },
           child: const Text('随机'),
@@ -283,7 +284,7 @@ void _showBuvidDialog(BuildContext context, VoidCallback setState) {
           onPressed: () {
             Get.back();
             if (buvid.isEmpty) return;
-            Pref.buvid = LoginUtils.buvid = buvid;
+            AnonymousAccount().buvid = buvid;
             setState();
           },
           child: const Text('确定'),
