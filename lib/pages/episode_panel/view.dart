@@ -99,7 +99,9 @@ class EpisodePanelState extends State<EpisodePanel>
     if (_tabController == null || positions.length == 1) {
       return positions.first;
     }
-    final posIndex = _posMap[_tabController!.index];
+    final tabIndex = _tabController!.index;
+    if (tabIndex < 0 || tabIndex >= _posList.length) return null;
+    final posIndex = _posList[tabIndex];
     if (posIndex != null && posIndex < positions.length) {
       return positions.elementAt(posIndex);
     }
