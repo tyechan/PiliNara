@@ -87,18 +87,35 @@ jobs:
                   done
               shell: bash
 
+            # gh, not softprops/action-gh-release. That action was given
+            # prerelease=true for 1102a/1102b and still published them as
+            # full Latest releases. A full release is offered by the in-app
+            # updater. This step must leave prerelease=true.
             - name: Release
               if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '') }}
-              uses: softprops/action-gh-release@v3
-              with:
-                  tag_name: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}
-                  name: ${{ format('PiliPala {0} ({1})', env.version, env.version_code) }}
-                  body_path: .github/release_body.md
-                  target_commitish: ${{ github.sha }}
-                  prerelease: true
-                  make_latest: false
-                  files: |
-                      PiliPala-*.apk
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  tag="${{ github.event_name == 'push' && github.ref_name || github.event.inputs.tag }}"
+                  title="PiliPala ${{ env.version }} (${{ env.version_code }})"
+                  gh release create "$tag" \
+                    --repo "${{ github.repository }}" \
+                    --prerelease \
+                    --latest=false \
+                    --title "$title" \
+                    --notes-file .github/release_body.md \
+                    --target "${{ github.sha }}" \
+                    PiliPala-*.apk
+                  is_pre=$(gh release view "$tag" --repo "${{ github.repository }}" --json isPrerelease --jq .isPrerelease)
+                  if [ "$is_pre" != "true" ]; then
+                    gh release edit "$tag" --repo "${{ github.repository }}" --prerelease --latest=false || true
+                    is_pre=$(gh release view "$tag" --repo "${{ github.repository }}" --json isPrerelease --jq .isPrerelease)
+                  fi
+                  if [ "$is_pre" != "true" ]; then
+                    echo "refusing to leave a full release for $tag" >&2
+                    gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag=false || true
+                    exit 1
+                  fi
 
             - name: 上传
               uses: actions/upload-artifact@v7

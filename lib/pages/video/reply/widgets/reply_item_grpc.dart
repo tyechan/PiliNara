@@ -875,20 +875,30 @@ class ReplyItemGrpc extends StatelessWidget {
             debugPrint('Validating timestamp: $matchStr with tag: $heroTag');
           }
           try {
-            final ctr = Get.find<AudioController>(tag: heroTag);
-            isValid =
-                DurationUtils.parseDuration(matchStr) * 1000 <=
-                ctr.duration.value * 1000;
-            if (kDebugMode) debugPrint('Found AudioController, isValid: $isValid');
-          } catch (_) {
-            try {
-              final ctr = Get.find<VideoDetailController>(tag: heroTag);
-              isValid =
-                  DurationUtils.parseDuration(matchStr) * 1000 <=
-                  ctr.data.timeLength!;
-              if (kDebugMode) debugPrint('Found VideoDetailController, isValid: $isValid');
-            } catch (e) {
-              if (kDebugMode) debugPrint('No controller found for tag: $heroTag, error: $e');
+            // Null tag matches an untagged controller and marks unrelated
+            // timestamps as seekable. Skip the lookup when there is no tag.
+            if (heroTag != null) {
+              try {
+                final ctr = Get.find<AudioController>(tag: heroTag);
+                isValid =
+                    DurationUtils.parseDuration(matchStr) * 1000 <=
+                    ctr.duration.value * 1000;
+                if (kDebugMode) {
+                  debugPrint('Found AudioController, isValid: $isValid');
+                }
+              } catch (_) {
+                final ctr = Get.find<VideoDetailController>(tag: heroTag);
+                isValid =
+                    DurationUtils.parseDuration(matchStr) * 1000 <=
+                    ctr.data.timeLength!;
+                if (kDebugMode) {
+                  debugPrint('Found VideoDetailController, isValid: $isValid');
+                }
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              debugPrint('No controller found for tag: $heroTag, error: $e');
             }
           }
           spanChildren.add(
