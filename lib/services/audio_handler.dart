@@ -1,4 +1,4 @@
-import 'dart:io' show File, Platform;
+import 'dart:io' show File, Platform, exit;
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:get/get.dart';
@@ -16,6 +16,7 @@ import 'package:PiliPlus/pages/video/introduction/local/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
@@ -510,5 +511,63 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   void clear() {
     if (!enableBackgroundPlay) return;
     _clearCurrentSession();
+  }
+
+  /// Stop every player this service can see, then drop the loopback proxy.
+  ///
+  /// Clearing the media session only removes the notification. libmpv keeps
+  /// decoding on its own threads, and the VOD proxy can keep feeding it.
+  /// Silence both before the process is torn down.
+  Future<void> _silenceForTaskRemoved() async {
+    const timeout = Duration(milliseconds: 800);
+    final video = PlPlayerController.instance?.videoPlayerController;
+    if (video != null) {
+      try {
+        await video.pause().timeout(timeout);
+      } catch (_) {}
+      try {
+        await video.stop().timeout(timeout);
+      } catch (_) {}
+    }
+    final tag = currentHeroTag;
+    if (tag != null) {
+      try {
+        final audio = Get.find<AudioController>(tag: tag);
+        final player = audio.player;
+        if (player != null) {
+          try {
+            await player.pause().timeout(timeout);
+          } catch (_) {}
+          try {
+            await player.stop().timeout(timeout);
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    if (Platform.isAndroid) {
+      try {
+        await VodHttpProxy.instance.shutdown();
+      } catch (_) {}
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    await _silenceForTaskRemoved();
+    try {
+      await super.stop().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> onTaskRemoved() async {
+    try {
+      await stop();
+    } catch (_) {}
+    // Home does not remove the task, so background playback while the app is
+    // only minimized never reaches here. Swiping the card does.
+    if (Platform.isAndroid) {
+      exit(0);
+    }
   }
 }

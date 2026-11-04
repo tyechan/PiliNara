@@ -167,6 +167,24 @@ class VodHttpProxy {
     _syncOrphanWatch();
   }
 
+  /// Hard-stop every session and the loopback server.
+  ///
+  /// Used when the task is removed. [closeAll] alone leaves [HttpServer]
+  /// bound, and mpv can keep reading it after the media session is gone.
+  Future<void> shutdown() async {
+    closeAll(reason: 'dispose');
+    _orphanWatch?.cancel();
+    _orphanWatch = null;
+    _currentVideoId = null;
+    _currentAudioId = null;
+    final server = _server;
+    _server = null;
+    port = null;
+    try {
+      await server?.close(force: true);
+    } catch (_) {}
+  }
+
   Future<void> resetForTest() async {
     VodProxyLog.resetForTest();
     VodHostHealth.instance.resetForTest();

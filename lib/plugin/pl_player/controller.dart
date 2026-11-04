@@ -792,8 +792,15 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           portraitUpMode();
         }
       case .portraitDown:
-        if (!horizontalScreen) return;
-        portraitDownMode();
+        // Nobody holds a phone upside down. Follow the portraitUp path so the
+        // UI stays in normal portrait instead of SCREEN_ORIENTATION_REVERSE_PORTRAIT.
+        if (!horizontalScreen && !_isVertical && isFullScreen) {
+          if (!isManualFS) {
+            triggerFullScreen(status: false, orientation: .portraitUp);
+          }
+        } else {
+          portraitUpMode();
+        }
       case .landscapeLeft:
         if (controlsLock.value && (lockFsRotation || _isVertical)) return;
         if (!horizontalScreen && !isFullScreen) {

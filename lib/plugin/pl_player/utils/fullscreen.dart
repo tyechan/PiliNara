@@ -35,10 +35,6 @@ Future<void>? portraitUpMode() {
   return _setPreferredOrientations(const [.portraitUp]);
 }
 
-Future<void>? portraitDownMode() {
-  return _setPreferredOrientations(const [.portraitDown]);
-}
-
 Future<void>? landscapeLeftMode() {
   return _setPreferredOrientations(const [.landscapeLeft]);
 }
@@ -47,9 +43,15 @@ Future<void>? landscapeRightMode() {
   return _setPreferredOrientations(const [.landscapeRight]);
 }
 
+/// Portrait plus both landscapes.
+///
+/// [DeviceOrientation.portraitDown] is intentionally absent. Flutter turns the
+/// four-way set into `SCREEN_ORIENTATION_FULL_USER`, which rotates a phone
+/// upside down. This three-way set becomes `SCREEN_ORIENTATION_USER`: landscape
+/// auto-rotation still works, reverse portrait does not.
 Future<void>? fullMode() {
   return _setPreferredOrientations(
-    const [.portraitUp, .portraitDown, .landscapeLeft, .landscapeRight],
+    const [.portraitUp, .landscapeLeft, .landscapeRight],
   );
 }
 
