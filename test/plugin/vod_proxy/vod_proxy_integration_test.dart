@@ -702,6 +702,23 @@ void main() {
     await expectLater(_fetchAll(proxyUrl), throwsA(isA<HttpException>()));
   }, timeout: const Timeout(Duration(seconds: 25)));
 
+  test('shutdown closes the loopback server', () async {
+    final cdn = _MockCdn(payload);
+    await cdn.start();
+    addTearDown(cdn.stop);
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      cdn.url,
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    expect(VodHttpProxy.instance.isRunning, isTrue);
+    await VodHttpProxy.instance.shutdown();
+    expect(VodHttpProxy.instance.hasActiveSession, isFalse);
+    expect(VodHttpProxy.instance.isRunning, isFalse);
+    await expectLater(_fetchAll(proxyUrl!), throwsA(anything));
+  }, timeout: const Timeout(Duration(seconds: 25)));
+
   test('lingering session is reclaimed by id after wrap parks it', () async {
     final cdn = _MockCdn(payload);
     await cdn.start();
