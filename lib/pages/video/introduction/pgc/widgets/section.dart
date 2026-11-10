@@ -239,7 +239,7 @@ class _SectionPanelState extends State<SectionPanel> {
         if (item.badge == '会员' && !_isVip) {
           SmartDialog.showToast('需要大会员');
         }
-        widget.onChangeEpisode(item, episodeType: .section);
+        widget.onChangeEpisode(item, episodeType: .section, manual: true);
       },
       child: Column(
         spacing: 4,

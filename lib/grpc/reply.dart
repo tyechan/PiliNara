@@ -13,11 +13,8 @@ abstract final class ReplyGrpc {
   static bool antiGoodsReply = Pref.antiGoodsReply;
   static var blockAtOnlyReply = Pref.blockAtOnlyReply;
   static var blockReplyAtCount = Pref.blockReplyAtCount;
-  static RegExp replyRegExp = RegExp(
-    Pref.parseBanWordToRegex(Pref.banWordForReply),
-    caseSensitive: false,
-  );
-  static bool enableFilter = replyRegExp.pattern.isNotEmpty;
+  static List<RegExp> replyRegExp = Pref.compileBanWord(Pref.banWordForReply);
+  static bool enableFilter = replyRegExp.isNotEmpty;
   static Map<int, String> replyBlockedMids = Pref.replyBlockedMids;
   static int replyMinLevel = Pref.replyMinLevel;
   static bool keepUpOwnerReply = Pref.keepUpOwnerReply;
@@ -114,7 +111,8 @@ abstract final class ReplyGrpc {
     // fork 白名单优先于一切屏蔽规则（含 @ 刷屏与全局黑名单）
     if (UserWhitelist.contains(mid)) return false;
     if (GlobalData().blackMids.contains(mid)) return true;
-    if (_blockReplyAtCount(reply) || _blockAtOnlyReply(reply)) return true;
+    if (_blockReplyAtCount(reply)) return true;
+    if (_blockAtOnlyReply(reply)) return true;
     if (antiGoodsReply && _needRemoveGoodGrpc(reply)) return true;
     final replyControl = reply.replyControl;
     if (keepUpOwnerReply && upMid != null && reply.mid == upMid) return false;
@@ -131,7 +129,7 @@ abstract final class ReplyGrpc {
     Int64? rpid,
     required Mode mode,
     required String? offset,
-    required Int64? cursorNext,
+    // Int64? cursorNext,
   }) async {
     final res = await GrpcReq.request(
       GrpcUrl.mainList,
@@ -151,12 +149,13 @@ abstract final class ReplyGrpc {
     if (res case Success(:final response)) {
       final upMid = response.subjectControl.upMid;
       // keyword filter
-      if (response.hasUpTop() &&
-          needRemoveGrpc(
-            response.upTop,
-            upMid: upMid,
-          )) {
-        response.clearUpTop();
+      if (response.hasUpTop()) {
+        final topReply = response.upTop;
+        if (needRemoveGrpc(topReply, upMid: upMid)) {
+          response.clearUpTop();
+        } else {
+          topReply.replies.removeWhere((item) => needRemoveGrpc(item, upMid: upMid));
+        }
       }
 
       if (response.replies.isNotEmpty) {
@@ -173,6 +172,19 @@ abstract final class ReplyGrpc {
           return hasMatch;
         });
       }
+
+      if (response.replies.isEmpty && !response.hasUpTop()) {
+        final offset = response.paginationReply.nextOffset;
+        if (offset.isNotEmpty && !response.cursor.isEnd) {
+          return mainList(
+            type: type,
+            oid: oid,
+            rpid: rpid,
+            mode: mode,
+            offset: offset,
+          );
+        }
+      }
     }
     return res;
   }
@@ -184,6 +196,7 @@ abstract final class ReplyGrpc {
     required int rpid,
     required Mode mode,
     required String? offset,
+    Map<Int64, ReplyInfo>? removed,
   }) async {
     final res = await GrpcReq.request(
       GrpcUrl.detailList,
@@ -201,7 +214,9 @@ abstract final class ReplyGrpc {
     if (res case Success(:final response)) {
       final upMid = response.subjectControl.upMid;
       response.root.replies.removeWhere((item) {
-        return needRemoveGrpc(item, upMid: upMid);
+        final flag = needRemoveGrpc(item, upMid: upMid);
+        if (flag) removed?[item.id] = item;
+        return flag;
       });
     }
     return res;

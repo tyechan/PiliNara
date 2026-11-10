@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:convert' show jsonDecode;
+import 'dart:convert' show jsonDecode, utf8;
 import 'dart:io';
 import 'dart:math' show Random, min;
 import 'dart:ui';
@@ -27,7 +27,6 @@ import 'package:PiliPlus/models/common/sponsor_block/segment_model.dart';
 import 'package:PiliPlus/models/common/sponsor_block/segment_type.dart';
 import 'package:PiliPlus/models/common/video/base_quality.dart';
 import 'package:PiliPlus/models/common/video/source_type.dart';
-import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
 import 'package:PiliPlus/models/common/video/video_decode_type.dart';
 import 'package:PiliPlus/models/common/video/video_type.dart';
 import 'package:PiliPlus/models/video/play/url.dart';
@@ -78,6 +77,7 @@ import 'package:PiliPlus/utils/reply_scheme_helper.dart';
 import 'package:PiliPlus/utils/storage.dart';
 import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
+import 'package:PiliPlus/utils/subtitle_utils.dart';
 import 'package:PiliPlus/utils/theme_utils.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
@@ -85,7 +85,7 @@ import 'package:collection/collection.dart';
 import 'package:dio/dio.dart' show Options;
 import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart'
     show ExtendedNestedScrollViewState;
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show kDebugMode, compute;
 import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
 import 'package:get/get.dart';
@@ -93,6 +93,8 @@ import 'package:hive_ce/hive.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:media_kit/media_kit.dart' hide Subtitle;
 import 'package:path/path.dart' as path;
+
+typedef SubtitleData = ({bool isData, String id});
 
 class VideoDetailController extends GetxController
     with GetTickerProviderStateMixin, BlockMixin {
@@ -163,6 +165,8 @@ class VideoDetailController extends GetxController
 
   // 是否开始自动播放 存在多p的情况下，第二p需要为true
   final RxBool _autoPlay = Pref.autoPlayEnable.obs;
+
+  bool _autoPlayNetworkChecked = false;
 
   final videoPlayerKey = GlobalKey();
   final childKey = GlobalKey<MiniScaffoldState>();
@@ -410,14 +414,33 @@ class VideoDetailController extends GetxController
     if (plPlayerController.enableBlock) {
       resetBlock();
       if (entry.segments case final list? when list.isNotEmpty) {
-        handleSBData(list);
+        final isPgc = entry.ep != null;
+        if (isPgc ? plPlayerController.enablePgcSkip : plPlayerController.enableSponsorBlock) {
+          handleSBData(list, useBlockConfig: !isPgc, isBlockSource: !isPgc);
+        }
       }
     }
   }
 
   void initFileSource(BiliDownloadEntryInfo entry) {
     this.entry = entry;
+    // block
     _initLocalSkipIfNeeded();
+    // viewPoint
+    if (plPlayerController.showViewPoints) {
+      final viewPoints = entry.viewPoints;
+      if (viewPoints != null && viewPoints.isNotEmpty) {
+        try {
+          final duration = (entry.totalTimeMilli / 1000);
+          viewPointList.value = viewPoints
+              .where((e) => e.type == 2 && e.to != null && duration > 0)
+              .map((e) => e.toSegment(duration))
+              .toList();
+        } catch (_) {
+          if (kDebugMode) rethrow;
+        }
+      }
+    }
     firstVideo = VideoItem(
       id: entry.preferedVideoQuality,
       quality: VideoQuality.fromCode(entry.preferedVideoQuality),
@@ -701,7 +724,7 @@ class VideoDetailController extends GetxController
         mediaList: mediaList,
         onChangeEpisode: (episode, {bool manual = false}) async {
           try {
-            return ugcIntroCtr.onChangeEpisode(episode, manual: manual);
+            return await ugcIntroCtr.onChangeEpisode(episode, manual: manual);
           } catch (_) {}
           return false;
         },
@@ -793,8 +816,7 @@ class VideoDetailController extends GetxController
   int get currPosInMilliseconds =>
       defaultST?.inMilliseconds ?? plPlayerController.positionInMilliseconds;
   @override
-  Future<void> seekTo(Duration duration, {required bool isSeek}) =>
-      plPlayerController.seekTo(duration, isSeek: isSeek);
+  Future<void> seekTo(Duration duration) => plPlayerController.seekTo(duration);
 
   @override
   Widget buildItem(Object item, Animation<double> animation) {
@@ -838,7 +860,7 @@ class VideoDetailController extends GetxController
                   }
                   onRemoveItem(listData.indexOf(item), item);
                 } else if (item is SegmentModel) {
-                  onSkip(item, isSeek: false);
+                  onSkip(item);
                   onRemoveItem(listData.indexOf(item), item);
                 }
               },
@@ -898,7 +920,7 @@ class VideoDetailController extends GetxController
 
     if (videoList.isEmpty) {
       final fallback = allVideos.first;
-      currentVideoQa.value = VideoQuality.fromCode(fallback.id!);
+      currentVideoQa.value = VideoQuality.fromCode(fallback.id);
       return fallback;
     }
 
@@ -1033,9 +1055,7 @@ class VideoDetailController extends GetxController
       return;
     }
 
-    // 本地文件（离线缓存）的跳过片段已在 initFileSource 里通过
-    // _initLocalSkipIfNeeded 注入，此处不重复初始化
-    if (plPlayerController.enableBlock && !isFileSource) {
+    if (plPlayerController.enableBlock) {
       initSkip();
     }
     if (!isFileSource) {
@@ -1051,9 +1071,6 @@ class VideoDetailController extends GetxController
         _getDmCount();
       }
 
-      if (plPlayerController.enableBlock) {
-        initSkip();
-      }
     } else {
       if (vttSubtitlesIndex.value == -1) {
         unawaited(_loadFileSubtitles());
@@ -1124,7 +1141,7 @@ class VideoDetailController extends GetxController
       // 跨视频/分P时重置画质缓存，确保根据半屏/全屏设置重新选择默认画质。
       // resetTempSettings 在 setDataSource 中执行（HTTP 请求之后），
       // 此处提前重置使得 cacheVideoQa == null 分支能正确初始化。
-      if (PlatformUtils.isMobile) {
+      if (PlatformUtils.isMobile || Platform.isLinux) {
         plPlayerController.cacheVideoQa = null;
       }
       _lastQueryBvid = bvid;
@@ -1142,11 +1159,25 @@ class VideoDetailController extends GetxController
     bool autoFullScreenFlag,
     bool reinitializePlayer,
   ) async {
+    bool? netIsWiFi;
+    if (!_autoPlayNetworkChecked) {
+      _autoPlayNetworkChecked = true;
+      if (PlatformUtils.isMobile &&
+          _autoPlay.value &&
+          Pref.autoPlayWifiOnly) {
+        netIsWiFi = await ConnectivityUtils.isWiFi;
+        if (!netIsWiFi) {
+          _autoPlay.value = false;
+        }
+      }
+    }
     if (plPlayerController.enableSponsorBlock && isBlock && !fromReset) {
       querySponsorBlock(bvid: bvid, cid: cid.value);
     }
-    if (PlatformUtils.isMobile || Platform.isLinux) {
-      final isWiFi = await ConnectivityUtils.isWiFi;
+    if (PlatformUtils.isMobile ||
+        Platform.isLinux ||
+        plPlayerController.cacheVideoQa == null) {
+      final isWiFi = netIsWiFi ?? await ConnectivityUtils.isWiFi;
       // Mobile recomputes every query so half-screen / cellular caps stay
       // current. Desktop (including Linux) keeps a manual pick until the
       // cached quality is cleared.
@@ -1387,8 +1418,8 @@ class VideoDetailController extends GetxController
   }
 
   Future<void> _loadLocalPlaybackMeta() async {
-    viewPointList.clear();
-    resetBlock();
+    final localEntry = entry;
+    final localCid = cid.value;
     final metaFile = File(
       path.join(entry.entryDirPath, PathUtils.playbackMetaName),
     );
@@ -1400,10 +1431,12 @@ class VideoDetailController extends GetxController
         (jsonDecode(await metaFile.readAsString()) as Map)
             .cast<String, dynamic>(),
       );
+      if (isClosed || entry != localEntry || cid.value != localCid) return;
       final durationMs = data.timeLength ?? entry.totalTimeMilli;
       final chapters = meta.chapters;
       if (plPlayerController.showViewPoints &&
           durationMs > 0 &&
+          viewPointList.isEmpty &&
           chapters != null) {
         viewPointList.assignAll(
           chapters.items.where((item) => item.toMs != null).map((item) {
@@ -1418,7 +1451,10 @@ class VideoDetailController extends GetxController
           }).toList(),
         );
       }
-      if (_resolveLocalSkipSegments(meta) case final resolved?) {
+      final resolved = entry.segments?.isNotEmpty == true
+          ? null : _resolveLocalSkipSegments(meta);
+      if (resolved != null) {
+        resetBlock();
         await handleSBData(
           resolved.items,
           useBlockConfig: resolved.useBlockConfig,
@@ -1433,8 +1469,14 @@ class VideoDetailController extends GetxController
   }
 
   Future<void> _loadFileSubtitles() async {
-    // 与 _queryPlayInfo 一致:清理副字幕状态及 mpv secondary-sid 残留
+    final localEntry = entry;
+    final localCid = cid.value;
     await setSecondarySubtitle(0);
+    final validSubs = <Subtitle>[
+      ...?entry.subtitles?.whereType<LocalSubtitle>()
+          .where((sub) => File(sub.path).existsSync()),
+    ];
+    if (isClosed || entry != localEntry || cid.value != localCid) return;
     final indexFile = File(
       path.join(
         entry.entryDirPath,
@@ -1442,48 +1484,77 @@ class VideoDetailController extends GetxController
         PathUtils.subtitleIndexName,
       ),
     );
-    if (!indexFile.existsSync()) return;
-
-    List<Subtitle> loaded;
-    try {
-      final jsonList = (jsonDecode(await indexFile.readAsString()) as List)
-          .cast<Map<String, dynamic>>();
-      loaded = jsonList.map(Subtitle.fromJson).toList();
-    } catch (e) {
-      if (kDebugMode) debugPrint('_loadFileSubtitles parse failed: $e');
-      return;
+    var loaded = <Subtitle>[];
+    if (indexFile.existsSync()) {
+      try {
+        final jsonList = (jsonDecode(await indexFile.readAsString()) as List)
+            .cast<Map<String, dynamic>>();
+        loaded = jsonList.map(Subtitle.fromJson).toList();
+      } catch (e) {
+        if (kDebugMode) debugPrint('_loadFileSubtitles parse failed: $e');
+      }
     }
 
-    final validSubs = <Subtitle>[];
+    if (isClosed || entry != localEntry || cid.value != localCid) return;
+
+    final languages = validSubs.map((sub) => sub.lan).toSet();
+    final legacyPaths = <Subtitle, String>{};
     for (final sub in loaded) {
+      if (languages.contains(sub.lan)) continue;
       final vttPath = path.join(
         entry.entryDirPath,
         PathUtils.subtitlesDirName,
         PathUtils.subtitleVttName(sub.lan),
       );
       if (File(vttPath).existsSync()) {
-        vttSubtitles[validSubs.length] = (isData: false, id: vttPath);
+        legacyPaths[sub] = vttPath;
+        languages.add(sub.lan);
         validSubs.add(sub);
       }
     }
-    if (validSubs.isEmpty) return;
-    if (isClosed) return;
+    if (validSubs.isEmpty || isClosed || entry != localEntry || cid.value != localCid) return;
 
-    subtitles.value = validSubs;
+    validSubs.sort();
+    vttSubtitles.clear();
+    for (var i = 0; i < validSubs.length; i++) {
+      final legacyPath = legacyPaths[validSubs[i]];
+      if (legacyPath != null) {
+        vttSubtitles[i] = (isData: false, id: legacyPath);
+      }
+    }
+    await _setSubtitle(validSubs);
+  }
 
-    final idx = switch (Pref.subtitlePreferenceV2) {
-      SubtitlePrefType.off => 0,
-      SubtitlePrefType.on => 1,
-      SubtitlePrefType.withoutAi =>
-        subtitles.first.lan.startsWith('ai') ? 0 : 1,
-      SubtitlePrefType.auto =>
-        !subtitles.first.lan.startsWith('ai') ||
-                (PlatformUtils.isMobile &&
-                    (await FlutterVolumeController.getVolume() ?? 0.0) <= 0.0)
-            ? 1
-            : 0,
-    };
-    if (!isClosed) await setSubtitle(idx);
+  Future<SubtitleData?> loadFileSubtitle({
+    required String path,
+    required String fileName,
+    int? cacheIndex,
+  }) async {
+    final subtitleCid = cid.value;
+    SubtitleData? data;
+    final length = cacheIndex ?? subtitles.length;
+    if (SubtitleUtils.isJson(fileName)) {
+      final file = File(path);
+      final stream = file.openRead().transform(utf8.decoder);
+      final buffer = StringBuffer();
+      await for (final chunk in stream) {
+        if (isClosed || cid.value != subtitleCid) return null;
+        buffer.write(chunk);
+      }
+      if (isClosed || cid.value != subtitleCid) return null;
+      String sub = buffer.toString();
+      sub = await compute<List, String>(
+        SubtitleUtils.json2Vtt,
+        jsonDecode(sub)['body'],
+      );
+      if (isClosed || cid.value != subtitleCid) return null;
+      data = (isData: true, id: sub);
+      vttSubtitles[length] = data;
+    } else {
+      data = (isData: false, id: path);
+      vttSubtitles[length] = data;
+    }
+    return data;
   }
 
   // 设定字幕轨道
@@ -1537,16 +1608,32 @@ class VideoDetailController extends GetxController
   /// 取 subtitles[subIdx] 的 VTT 播放地址(本地文件路径或 memory:// 数据),
   /// 网络字幕转换结果缓存于 [vttSubtitles]。
   Future<String?> _resolveVttUri(int subIdx) async {
-    ({bool isData, String id})? subtitle = vttSubtitles[subIdx];
-    if (subtitle == null) {
-      final result = await VideoHttp.getSubtitles(
-        subtitles[subIdx].subtitleUrl!,
-      );
-      if (result == null) return null;
-      subtitle = (isData: true, id: result);
+    if (subIdx < 0 || subIdx >= subtitles.length) return null;
+    final rawSub = subtitles[subIdx];
+    final subtitleCid = cid.value;
+    var subtitle = vttSubtitles[subIdx];
+    try {
+      if (subtitle == null) {
+        if (rawSub is LocalSubtitle) {
+          subtitle = await loadFileSubtitle(
+            path: rawSub.path, fileName: PathUtils.subtitleExt, cacheIndex: subIdx,
+          );
+        } else if (rawSub.subtitleUrl case final url? when url.isNotEmpty) {
+          final result = await VideoHttp.getSubtitles(url);
+          if (result != null) subtitle = (isData: true, id: result);
+        }
+      }
+      if (isClosed || cid.value != subtitleCid ||
+          subIdx >= subtitles.length || !identical(rawSub, subtitles[subIdx]) ||
+          subtitle == null) {
+        return null;
+      }
       vttSubtitles[subIdx] = subtitle;
+      return subtitle.isData ? 'memory://${subtitle.id}' : subtitle.id;
+    } catch (e) {
+      if (!isClosed) SmartDialog.showToast('字幕加载失败: $e');
+      return null;
     }
-    return subtitle.isData ? 'memory://${subtitle.id}' : subtitle.id;
   }
 
   // interactive video
@@ -1667,16 +1754,10 @@ class VideoDetailController extends GetxController
       if (plPlayerController.showViewPoints &&
           response.viewPoints?.firstOrNull?.type == 2) {
         try {
-          viewPointList.value = response.viewPoints!.map((item) {
-            final end = (item.to! / (data.timeLength! / 1000)).clamp(0.0, 1.0);
-            return ViewPointSegment(
-              end: end,
-              title: item.content,
-              url: item.imgUrl,
-              from: item.from,
-              to: item.to,
-            );
-          }).toList();
+          final duration = (data.timeLength! / 1000);
+          viewPointList.value = response.viewPoints!
+              .map((e) => e.toSegment(duration))
+              .toList();
         } catch (_) {}
       }
 
@@ -1685,24 +1766,9 @@ class VideoDetailController extends GetxController
       } else if (!Accounts.heartbeat.isLogin) {
         final res = await DmGrpc.dmView(aid, cid.value);
         if (res case Success(:final response)) {
-          if (response.hasSubtitle() &&
-              response.subtitle.subtitles.isNotEmpty) {
-            _setSubtitle(
-              response.subtitle.subtitles
-                  .map(
-                    (i) => Subtitle(
-                      lan: i.lan,
-                      lanDoc: i.lanDoc,
-                      subtitleUrl: i.subtitleUrl.replaceFirst(
-                        RegExp('^https?:'),
-                        '',
-                      ),
-                      isAi: i.type == .AI,
-                    ),
-                  )
-                  .toList()
-                ..sort(),
-            );
+          if (DmGrpc.dmViewToSubtitle(response) case final sub?
+              when (sub.isNotEmpty)) {
+            _setSubtitle(sub);
           }
         } else {
           res.toast();
@@ -1712,6 +1778,7 @@ class VideoDetailController extends GetxController
   }
 
   Future<void> _setSubtitle(List<Subtitle> sub) async {
+    final subtitleCid = cid.value;
     subtitles.value = sub;
     final idx = switch (Pref.subtitlePreferenceV2) {
       .off => 0,
@@ -1724,7 +1791,9 @@ class VideoDetailController extends GetxController
             ? 1
             : 0,
     };
-    await setSubtitle(idx);
+    if (!isClosed && cid.value == subtitleCid && identical(subtitles.firstOrNull, sub.firstOrNull)) {
+      await setSubtitle(idx);
+    }
   }
 
   void updateMediaListHistory(int aid) {
@@ -2022,7 +2091,7 @@ class VideoDetailController extends GetxController
     try {
       if (plPlayerController.enableBlock) {
         if (listData.lastOrNull case final SegmentModel item) {
-          onSkip(item, isSeek: false);
+          onSkip(item);
           onRemoveItem(listData.indexOf(item), item);
           return true;
         }
