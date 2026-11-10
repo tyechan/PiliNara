@@ -1,4 +1,4 @@
-import 'dart:io' show File, Platform;
+import 'dart:io' show File, Platform, exit;
 import 'dart:ui' show PlatformDispatcher;
 
 import 'package:get/get.dart';
@@ -12,12 +12,15 @@ import 'package:PiliPlus/models_new/pgc/pgc_info_model/episode.dart';
 import 'package:PiliPlus/models_new/video/video_detail/data.dart';
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
 import 'package:PiliPlus/pages/common/common_intro_controller.dart';
+import 'package:PiliPlus/pages/live_room/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/local/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/pgc/controller.dart';
 import 'package:PiliPlus/pages/video/introduction/ugc/controller.dart';
 import 'package:PiliPlus/plugin/pl_player/controller.dart';
+import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:PiliPlus/plugin/pl_player/models/play_status.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
+import 'package:PiliPlus/utils/device_utils.dart';
 import 'package:PiliPlus/utils/image_utils.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
@@ -25,16 +28,15 @@ import 'package:audio_service/audio_service.dart';
 import 'package:audio_service_mpris/audio_service_mpris.dart';
 import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
-import 'package:get/get_core/src/get_main.dart';
-import 'package:get/get_instance/src/extension_instance.dart';
 import 'package:jni/jni.dart' show JStringExtension;
 import 'package:path/path.dart' as path;
 
 Future<VideoPlayerServiceHandler> initAudioService() {
   if (Platform.isLinux) {
     AudioServiceMpris.init(
-      dBusName: 'com.example.piliplus.audio',
-      identity: 'Audio Service ${Constants.appName}',
+      dBusName: 'com.example.pilinara.audio',
+      identity: Constants.appName,
+      desktopEntry: 'com.example.pilinara',
       canGoNext: true,
       canGoPrevious: true,
       canPlay: true,
@@ -66,7 +68,10 @@ typedef _StatusConfig = (
 
 class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   VideoPlayerServiceHandler() {
-    if (Platform.isAndroid) {
+    // Android 14 dispatches volume keys from the activity straight to the
+    // session without checking canHandleVolumeKey(), so a FIXED remote
+    // session swallows them there. Only verified to fall back on Android 16.
+    if (Platform.isAndroid && DeviceUtils.sdkInt >= 36) {
       final jStr = AndroidHelper.manufacturer();
       if (jStr != null &&
           jStr.toDartString(releaseOriginal: true).toLowerCase() == 'vivo') {
@@ -84,6 +89,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   static final List<MediaItem> _item = [];
   bool enableBackgroundPlay = Pref.enableBackgroundPlay;
 
+  bool Function()? isPlaying;
   Future<void>? Function()? onPlay;
   Future<void>? Function()? onPause;
   Future<void>? Function(Duration position)? onSeek;
@@ -92,6 +98,7 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   String? currentHeroTag;
 
   void _clearCallbacks() {
+    isPlaying = null;
     onPlay = null;
     onPause = null;
     onSeek = null;
@@ -124,6 +131,10 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> skipToNext() async {
+    final playOwner = PlPlayerController.playOwner;
+    if (playOwner != null && playOwner.type == null) {
+      return;
+    }
     if (onSkipToNext != null) {
       onSkipToNext?.call();
       return;
@@ -155,6 +166,10 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> skipToPrevious() async {
+    final playOwner = PlPlayerController.playOwner;
+    if (playOwner != null && playOwner.type == null) {
+      return;
+    }
     if (onSkipToPrevious != null) {
       onSkipToPrevious?.call();
       return;
@@ -199,18 +214,25 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
 
   CommonIntroController? _findIntroController() {
     final playOwner = PlPlayerController.playOwner;
-    if (playOwner != null) {
-      final tag = playOwner.tag;
-      try {
-        return switch (playOwner.type) {
-          UgcIntroController _ => Get.find<UgcIntroController>(tag: tag),
-          PgcIntroController _ => Get.find<PgcIntroController>(tag: tag),
-          LocalIntroController _ => Get.find<LocalIntroController>(tag: tag),
-          _ => throw UnimplementedError(playOwner.type.toString()),
-        };
-      } catch (_) {
-        if (kDebugMode) rethrow;
-      }
+    if (playOwner == null) {
+      return null;
+    }
+
+    final type = playOwner.type;
+    if (type == null) {
+      return null;
+    }
+
+    final tag = playOwner.tag;
+    try {
+      return switch (type) {
+        UgcIntroController => Get.find<UgcIntroController>(tag: tag),
+        PgcIntroController => Get.find<PgcIntroController>(tag: tag),
+        LocalIntroController => Get.find<LocalIntroController>(tag: tag),
+        _ => throw UnimplementedError(type.toString()),
+      };
+    } catch (_) {
+      if (kDebugMode) rethrow;
     }
     return null;
   }
@@ -219,8 +241,24 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> seek(Duration position) {
     return onSeek?.call(position) ??
-        PlPlayerController.seekToIfExists(position, isSeek: false) ??
+        PlPlayerController.seekToIfExists(position) ??
         Future.syncValue(null);
+  }
+
+  @override
+  Future<dynamic> customAction(String name, [Map<String, dynamic>? extras]) {
+    try {
+      switch (name) {
+        case 'ACTION_DM':
+          final tag = PlPlayerController.playOwner!.tag;
+          Get.find<LiveRoomController>(tag: tag).toggleDanmaku();
+        case 'ACTION_REFRESH':
+          final tag = PlPlayerController.playOwner!.tag;
+          Get.find<LiveRoomController>(tag: tag).queryLiveUrl();
+        default:
+      }
+    } catch (_) {}
+    return Future.syncValue(null);
   }
 
   void setMediaItem(MediaItem newMediaItem) {
@@ -321,24 +359,13 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     final hasEpisodes = _hasEpisodes();
 
     final controls = <MediaControl>[
+      if (isLive) _refresh,
       if (!isLive && hasEpisodes) MediaControl.skipToPrevious,
-      if (!isLive)
-        MediaControl.rewind.copyWith(
-          androidIcon: 'drawable/ic_player_rewind_10s',
-        ),
-      if (playing)
-        MediaControl.pause.copyWith(
-          androidIcon: 'drawable/ic_player_pause',
-        )
-      else
-        MediaControl.play.copyWith(
-          androidIcon: 'drawable/ic_player_play',
-        ),
-      if (!isLive)
-        MediaControl.fastForward.copyWith(
-          androidIcon: 'drawable/ic_player_fast_forward_10s',
-        ),
+      if (!isLive) _rewind,
+      if (playing) _pause else _play,
+      if (!isLive) _fastForward,
       if (!isLive && hasEpisodes) MediaControl.skipToNext,
+      if (isLive) _dm,
     ];
 
     int playPauseIndex = controls.indexWhere(
@@ -511,4 +538,100 @@ class VideoPlayerServiceHandler extends BaseAudioHandler with SeekHandler {
     if (!enableBackgroundPlay) return;
     _clearCurrentSession();
   }
+
+  /// Stop every player this service can see, then drop the loopback proxy.
+  ///
+  /// Clearing the media session only removes the notification. libmpv keeps
+  /// decoding on its own threads, and the VOD proxy can keep feeding it.
+  /// Silence both before the process is torn down.
+  Future<void> _silenceForTaskRemoved() async {
+    const timeout = Duration(milliseconds: 800);
+    final video = PlPlayerController.instance?.videoPlayerController;
+    if (video != null) {
+      try {
+        await video.pause().timeout(timeout);
+      } catch (_) {}
+      try {
+        await video.stop().timeout(timeout);
+      } catch (_) {}
+    }
+    final tag = currentHeroTag;
+    if (tag != null) {
+      try {
+        final audio = Get.find<AudioController>(tag: tag);
+        final player = audio.player;
+        if (player != null) {
+          try {
+            await player.pause().timeout(timeout);
+          } catch (_) {}
+          try {
+            await player.stop().timeout(timeout);
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+    if (Platform.isAndroid) {
+      try {
+        await VodHttpProxy.instance.shutdown();
+      } catch (_) {}
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    await _silenceForTaskRemoved();
+    try {
+      await super.stop().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+  }
+
+  @override
+  Future<void> onTaskRemoved() async {
+    try {
+      await stop();
+    } catch (_) {}
+    // Home does not remove the task, so background playback while the app is
+    // only minimized never reaches here. Swiping the card does.
+    if (Platform.isAndroid) {
+      exit(0);
+    }
+  }
 }
+
+const _refresh = MediaControl(
+  androidIcon: 'drawable/ic_player_refresh',
+  label: 'Refresh',
+  action: .custom,
+  customAction: CustomMediaAction(name: 'ACTION_REFRESH'),
+);
+
+const _dm = MediaControl(
+  androidIcon: 'drawable/ic_state_danmaku',
+  label: 'Danmaku',
+  action: .custom,
+  customAction: CustomMediaAction(name: 'ACTION_DM'),
+);
+
+const _play = MediaControl(
+  androidIcon: 'drawable/ic_player_play',
+  label: 'Play',
+  action: .play,
+);
+
+const _pause = MediaControl(
+  androidIcon: 'drawable/ic_player_pause',
+  label: 'Pause',
+  action: .pause,
+);
+
+const _rewind = MediaControl(
+  androidIcon: 'drawable/ic_player_rewind_10s',
+  label: 'Rewind',
+  action: .rewind,
+);
+
+const _fastForward = MediaControl(
+  androidIcon: 'drawable/ic_player_fast_forward_10s',
+  label: 'Fast Forward',
+  action: .fastForward,
+);

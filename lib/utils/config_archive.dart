@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Directory, File;
 import 'dart:typed_data';
 
 import 'package:PiliPlus/build_config.dart';
@@ -18,6 +19,7 @@ import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:archive/archive.dart';
 import 'package:get/get.dart';
+import 'package:path/path.dart' as path;
 
 class ImportResult {
   const ImportResult({required this.applied, this.message});
@@ -36,7 +38,8 @@ abstract final class ConfigArchive {
   static const String blacklistFileName = 'blacklist.json';
   static const String replyFileName = 'reply.json';
   static const String searchFileName = 'search.json';
-  static const String fontFileName = FontUtils.kFontName;
+  /// 归档内的字体文件名：沿用导入池里的原始文件名
+  static const String fontFileName = 'customFont';
 
   static const String _type = 'data_archive';
 
@@ -62,11 +65,10 @@ abstract final class ConfigArchive {
       zip.add(ArchiveFile.string(replyFileName, reply));
     }
 
-    final fontFile = FontUtils.selectedCustomFontFile;
-    if (fontFile != null) {
+    if (FontUtils.activeFontFile case final fontFile?) {
       zip.add(
         ArchiveFile.stream(
-          fontFileName,
+          '$fontFileName${path.extension(fontFile.path)}',
           InputFileStream(fontFile.path),
         ),
       );
@@ -140,21 +142,36 @@ abstract final class ConfigArchive {
     await apply(replyFileName, _importReply);
     await apply(searchFileName, _importSearch);
 
-    if (archive.find(fontFileName) case final file?) {
-      totalBytes += file.size;
+    // 字体文件按扩展名存放，先在归档里找带字体后缀的那一项
+    final fontEntry = archive.files.cast<ArchiveFile?>().firstWhere(
+      (f) =>
+          f != null &&
+          path.basenameWithoutExtension(f.name) == fontFileName &&
+          FontUtils.isSupportedFontFile(f.name),
+      orElse: () => null,
+    );
+    if (fontEntry != null) {
+      totalBytes += fontEntry.size;
       if (totalBytes > _maxTotalBytes) throw UnsupportedError('数据包过大');
       try {
-        final family = await FontUtils.importArchivedFont(file.content);
-        if (family == null) {
-          sb.writeln('$fontFileName：导入失败');
-        } else {
+        final tmpFile = File(
+          path.join(
+            Directory.systemTemp.path,
+            'pilinara_font_import${path.extension(fontEntry.name)}',
+          ),
+        );
+        await tmpFile.writeAsBytes(fontEntry.content);
+        final family = await FontUtils.adoptFontFile(tmpFile.path);
+        await tmpFile.delete().catchError((_) => tmpFile);
+        if (family != null) {
           await GStorage.setting.put(SettingBoxKey.appFont, family);
-          await FontUtils.loadFontIfNecessary(family);
+        } else {
+          sb.writeln('$fontFileName：字体导入失败');
         }
       } catch (e) {
         sb.writeln('$fontFileName：$e');
       } finally {
-        file.closeSync();
+        fontEntry.closeSync();
       }
     }
 
@@ -233,7 +250,8 @@ abstract final class ConfigArchive {
       blacklistFileName,
       if (GStorage.reply != null) replyFileName,
       searchFileName,
-      if (FontUtils.selectedCustomFontFile != null) fontFileName,
+      if (FontUtils.activeFontFile case final fontFile?)
+        '$fontFileName${path.extension(fontFile.path)}',
     ],
   });
 

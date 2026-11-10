@@ -53,6 +53,7 @@
             android:hardwareAccelerated="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
+            android:screenOrientation="user"
             android:supportsPictureInPicture="true"
             android:theme="@style/LaunchTheme"
             android:windowSoftInputMode="adjustResize">

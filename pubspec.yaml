@@ -17,7 +17,7 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
 # Dart semver only (x.y.z+build). Shipped versionName is lib/build_config.dart.
-version: 2.6.1+2026110202
+version: 2.6.2+2026111002
 
 environment:
   sdk: ">=3.13.0"
@@ -42,11 +42,11 @@ dependencies:
       url: https://github.com/bggRGjQaUbCoE/audio_service.git
       path: audio_service
       ref: dev
-  audio_service_mpris: ^1.0.0-beta.2
   audio_service_win:
     git:
       url: https://github.com/Starfallan/audio_service_win.git
       ref: main
+  audio_service_mpris: 1.0.0-beta.2
   audio_session:
     git:
       url: https://github.com/bggRGjQaUbCoE/audio_session.git
@@ -81,7 +81,7 @@ dependencies:
   device_info_plus: ^13.1.0
   dio: ^5.9.1
   dio_http2_adapter: ^2.7.1
-  dlna_dart: ^0.1.0
+  dlna_dart: ^0.1.2
   dynamic_color: ^2.1.0
   easy_debounce: ^2.0.3
   encrypt: ^5.0.3
@@ -184,10 +184,7 @@ dependencies:
   webview_all_linux: ^1.4.9
   webview_platform_interface: ^1.4.9
   win32: ^6.3.0
-  window_manager:
-    git:
-      url: https://github.com/leanflutter/window_manager.git
-      ref: main
+  window_manager: ^0.6.0
 
 dependency_overrides:
   clipboard:

@@ -46,9 +46,10 @@ class LocalIntroController extends CommonIntroController {
 
   // 是否正在进入应用内小窗
   bool isEnteringPip = false;
-
   @override
   void onChangeEpisode(BaseEpisodeItem episode) => throw UnimplementedError();
+
+  late final Set<String> aidSet = {};
 
   @override
   void onClose() {
@@ -91,6 +92,7 @@ class LocalIntroController extends CommonIntroController {
         final (double offset, double remain) = calcFixedItemOffset(
           index: index,
           itemCount: list.length,
+          // bottomPadding: ignore view padding
         );
         try {
           final state = videoDetailCtr.scrollKey.currentState;

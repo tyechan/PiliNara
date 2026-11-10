@@ -211,7 +211,7 @@ void importFromInput<T>(
 
 Future<void> _exportAllDataToArchive() async {
   final name =
-      'piliplus_data_'
+      'pilinara_data_'
       '${DateFormatUtils.only0_9.format(DateTime.now())}.zip';
   if (PlatformUtils.isDesktop) {
     final path = await FilePicker.saveFile(

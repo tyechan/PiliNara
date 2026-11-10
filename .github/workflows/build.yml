@@ -31,6 +31,11 @@ on:
         required: false
         default: false
         type: boolean
+      build_win_x64_newlibmpv:
+        description: "Build Win-x64 (NewLibmpv)"
+        required: false
+        default: false
+        type: boolean
       build_linux_x64:
         description: "Build Linux-x64"
         required: false
@@ -156,6 +161,13 @@ jobs:
   win_x64:
     if: ${{ (github.event_name == 'pull_request' && github.repository == 'Starfallan/PiliNara') || github.event.inputs.build_win_x64 == 'true' }}
     uses: ./.github/workflows/win_x64.yml
+    permissions: write-all
+    with:
+      tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}
+
+  win_x64_newlibmpv:
+    if: ${{ github.event.inputs.build_win_x64_newlibmpv == 'true' }}
+    uses: ./.github/workflows/win_x64_newlibmpv.yml
     permissions: write-all
     with:
       tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}

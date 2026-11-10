@@ -368,6 +368,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           _logSponsorBlock('Refreshing videoState and cid after return');
           videoDetailController.videoState.refresh();
           videoDetailController.cid.refresh();
+          if (videoDetailController.isUgc) {
+            ugcIntroController.updateIndex(force: true);
+          }
           videoDetailController.update();
         });
       } else {
@@ -430,7 +433,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
         _logSponsorBlock('Restored VideoReplyController from PiP');
       } else {
         _videoReplyController = Get.put(
-          VideoReplyController(heroTag: heroTag),
+          VideoReplyController(
+            heroTag: heroTag,
+          ),
           tag: heroTag,
         );
       }
@@ -551,6 +556,9 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
           plPlayerController!.play();
         }
         videoDetailController.cid.refresh();
+        if (videoDetailController.isUgc) {
+          ugcIntroController.updateIndex(force: true);
+        }
         videoDetailController.cover.refresh();
 
         // 确保 IntroController 的数据被 UI 识别
@@ -2070,6 +2078,17 @@ class _VideoDetailPageVState extends State<VideoDetailPageV>
   }) {
     return KeyboardScrollable(
       controller: resolveCtr,
+      position: () {
+        final index = videoDetailController.tabCtr.index;
+        if (_shouldShowSeasonPanel &&
+            index == (videoDetailController.showReply ? 2 : 1)) {
+          return seasonEpisodeKey.currentState?.activeScrollPosition;
+        }
+        final controller = resolveCtr();
+        return controller != null && controller.hasClients
+            ? controller.position
+            : null;
+      },
       focusNode: tabContentFocusNode,
       child: child,
     );

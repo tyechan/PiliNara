@@ -1,8 +1,10 @@
 import 'dart:math' show max;
 
 import 'package:PiliPlus/common/widgets/custom_icon.dart';
+import 'package:PiliPlus/models/common/dm_chart_source.dart';
 import 'package:PiliPlus/pages/setting/models/model.dart';
 import 'package:PiliPlus/pages/setting/pages/danmaku_merge_setting.dart';
+import 'package:PiliPlus/pages/setting/widgets/select_dialog.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
 import 'package:PiliPlus/utils/filtering_text.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
@@ -21,6 +23,13 @@ List<SettingsModel> get dmSettings => [
     leading: Icon(CustomIcons.dm_settings),
     setKey: SettingBoxKey.enableShowDanmaku,
     defaultVal: true,
+  ),
+  const SwitchModel(
+    title: '智能防挡',
+    subtitle: '让弹幕避开画面中的人物（部分视频支持）',
+    leading: Icon(Icons.person_off_outlined),
+    setKey: SettingBoxKey.enableDanmakuMask,
+    defaultVal: false,
   ),
   if (PlatformUtils.isMobile)
     const SwitchModel(
@@ -70,6 +79,13 @@ List<SettingsModel> get dmSettings => [
       setState();
     },
   ),
+  NormalModel(
+    title: '高能进度条',
+    leading: const Icon(Icons.show_chart),
+    getSubtitle: () =>
+        '当前:「${Pref.dmChartSource.label}」\n显示视频弹幕热度趋势；官方无数据时可使用弹幕密度生成',
+    onTap: _showDmChartSourceDialog,
+  ),
 ];
 
 void _showDmHeightDialog(BuildContext context, VoidCallback setState) {
@@ -112,4 +128,26 @@ void _showDmHeightDialog(BuildContext context, VoidCallback setState) {
       ],
     ),
   );
+}
+
+Future<void> _showDmChartSourceDialog(
+  BuildContext context,
+  VoidCallback setState,
+) async {
+  final res = await showDialog<DmChartSource>(
+    context: context,
+    builder: (context) => SelectDialog<DmChartSource>(
+      title: '高能进度条',
+      value: Pref.dmChartSource,
+      values: DmChartSource.values.map((e) => (e, e.label)).toList(),
+      subtitleBuilder: (context, index, value) => Text(
+        DmChartSource.values[index].desc,
+        style: TextTheme.of(context).bodySmall,
+      ),
+    ),
+  );
+  if (res != null) {
+    await GStorage.setting.put(SettingBoxKey.dmChartSource, res.index);
+    setState();
+  }
 }

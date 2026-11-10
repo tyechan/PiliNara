@@ -11,7 +11,7 @@ struct MenuState {
   GtkWidget* menu = nullptr;
 };
 
-constexpr char kChannelName[] = "com.example.piliplus/linux_context_menu";
+constexpr char kChannelName[] = "com.example.pilinara/linux_context_menu";
 constexpr char kMenuData[] = "linux_context_menu_data";
 constexpr char kItemIndex[] = "linux_context_menu_index";
 

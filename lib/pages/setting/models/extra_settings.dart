@@ -14,7 +14,6 @@ import 'package:PiliPlus/models/common/sponsor_block/skip_type.dart';
 import 'package:PiliPlus/pages/common/slide/common_slide_page.dart';
 import 'package:PiliPlus/pages/home/controller.dart';
 import 'package:PiliPlus/pages/setting/models/model.dart';
-import 'package:PiliPlus/pages/setting/reply_setting.dart';
 import 'package:PiliPlus/pages/setting/widgets/slider_dialog.dart';
 import 'package:PiliPlus/services/download/download_service.dart';
 import 'package:PiliPlus/utils/accounts.dart';
@@ -89,19 +88,6 @@ List<SettingsModel> get extraSettings => [
     getSubtitle: () => '配置 OpenAI 兼容 API 和提示词模板',
     onTap: (context, _) => Get.toNamed('/aiSetting'),
   ),
-  NormalModel(
-    title: '评论区过滤设置',
-    leading: const Icon(Icons.comment_outlined),
-    getSubtitle: () => '关键词、用户屏蔽、等级过滤、屏蔽带货评论',
-    onTap: (context, _) => Get.to(() => const ReplySetting()),
-  ),
-  const SwitchModel(
-    title: '显示视频推荐理由',
-    subtitle: '显示首页视频卡片下方的已关注，x万点赞的标签',
-    leading: Icon(Icons.label_outline),
-    setKey: SettingBoxKey.showRcmdReason,
-    defaultVal: true,
-  ),
   const SwitchModel(
     title: '禁用 SSL 证书验证',
     subtitle: '谨慎开启，禁用容易受到中间人攻击',
@@ -153,6 +139,13 @@ List<SettingsModel> get extraSettings => [
     title: '记录搜索历史',
     leading: Icon(Icons.history),
     setKey: SettingBoxKey.recordSearchHistory,
+    defaultVal: true,
+  ),
+  const SwitchModel(
+    title: '显示视频推荐理由',
+    subtitle: '显示首页视频卡片下方的已关注，x万点赞的标签',
+    leading: Icon(Icons.label_outline),
+    setKey: SettingBoxKey.showRcmdReason,
     defaultVal: true,
   ),
   SwitchModel(

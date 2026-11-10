@@ -56,7 +56,6 @@ import 'package:PiliPlus/plugin/pl_player/widgets/play_pause_btn.dart';
 import 'package:PiliPlus/plugin/pl_player/widgets/speed_lock_arrows.dart';
 import 'package:PiliPlus/utils/android/bindings.g.dart';
 import 'package:PiliPlus/utils/cache_manager.dart';
-import 'package:PiliPlus/utils/connectivity_utils.dart';
 import 'package:PiliPlus/utils/desktop/window_controller.dart';
 import 'package:PiliPlus/utils/duration_utils.dart';
 import 'package:PiliPlus/utils/extension/num_ext.dart';
@@ -377,11 +376,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       debugOwner: this,
       dragStartBehavior: .start,
       allowedButtonsFilter: (buttons) => buttons == kPrimaryButton,
-      trackpadScrollToScaleFactor: const Offset(
-        0,
-        -1 / kDefaultMouseScrollToScaleFactor,
-      ),
-      trackpadScrollCausesScale: false,
+      // 触控板滑动交给进度/音量回调；固定画面焦点，保留捏合缩放。
+      trackpadScrollToScaleFactor: Offset.zero,
+      trackpadScrollCausesScale: true,
     );
   }
 
@@ -390,16 +387,16 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     // Keep playing in the PiP window.
     if (Platform.isIOS && IOSPipHelper.isActive) return;
     if (!plPlayerController.continuePlayInBackground.value) {
-      late final player = plPlayerController.videoPlayerController;
       if (const <AppLifecycleState>[.paused, .detached].contains(state)) {
+        final player = plPlayerController.videoPlayerController;
         if (player != null && player.state.playing) {
           _pauseDueToPauseUponEnteringBackgroundMode = true;
-          player.pause();
+          plPlayerController.pause();
         }
       } else {
         if (_pauseDueToPauseUponEnteringBackgroundMode) {
           _pauseDueToPauseUponEnteringBackgroundMode = false;
-          player?.play();
+          plPlayerController.play();
         }
       }
       // 后台播放关了，本功能不运行，转发生命周期以取消定时器
@@ -434,6 +431,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
 
   @override
   void dispose() {
+    _pendingTouchFullScreenToggle = null;
+    _activeTouchPointers.clear();
     removeObserverMobile(this);
     _danmakuListener?.cancel();
     _tapGestureRecognizer.dispose();
@@ -1152,6 +1151,9 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPanStart(ScaleStartDetails details) {
+    _isDesktopTouchPan = PlatformUtils.isDesktop &&
+        details.kind == ui.PointerDeviceKind.touch;
+    _pendingTouchFullScreenToggle = null;
     _gestureType = null;
     _initialFocalPoint = details.localFocalPoint;
   }
@@ -1198,7 +1200,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       feedBack();
       plPlayerController
         ..position.value = seekToPos.inSeconds
-        ..seekTo(seekToPos, isSeek: false)
+        ..seekTo(seekToPos)
         ..seekToPos = null;
     } else {
       plPlayerController.position.value =
@@ -1308,7 +1310,17 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
       double cumulativeDy = details.localFocalPoint.dy - _initialFocalPoint!.dy;
 
       void fullScreenTrigger(bool status) {
-        plPlayerController.triggerFullScreen(status: status);
+        if (_isDesktopTouchPan) {
+          if (_activeTouchPointers.length == 1) {
+            _pendingTouchFullScreenToggle = (
+              pointer: _activeTouchPointers.single,
+              target: status,
+              wasFullScreen: isFullScreen,
+            );
+          }
+        } else {
+          plPlayerController.triggerFullScreen(status: status);
+        }
       }
 
       if (cumulativeDy > threshold) {
@@ -1353,6 +1365,10 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPanEnd(ScaleEndDetails details) {
+    if (details.pointerCount != 0) {
+      _pendingTouchFullScreenToggle = null;
+    }
+    _isDesktopTouchPan = false;
     if (_gestureType == .horizontal) {
       _onHorizontalDragEnd();
     }
@@ -1469,7 +1485,15 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   /// 导致鼠标事件失效，因此延后到抬起后执行。
   (bool, bool)? _pendingFullScreenToggle;
 
+  final Set<int> _activeTouchPointers = {};
+  bool _isDesktopTouchPan = false;
+  ({int pointer, bool target, bool wasFullScreen})? _pendingTouchFullScreenToggle;
+
   void _onPointerDown(PointerDownEvent event) {
+    if (PlatformUtils.isDesktop && event.kind == ui.PointerDeviceKind.touch) {
+      _pendingTouchFullScreenToggle = null;
+      _activeTouchPointers.add(event.pointer);
+    }
     if (PlatformUtils.isDesktop) {
       final buttons = event.buttons;
       final isSecondaryBtn = buttons == kSecondaryMouseButton;
@@ -1504,6 +1528,20 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    _activeTouchPointers.remove(event.pointer);
+    final touchPending = _pendingTouchFullScreenToggle;
+    if (touchPending != null && touchPending.pointer == event.pointer) {
+      // Listener 先于识别器收到 Up，等其清除触点后再改变原生窗口。
+      scheduleMicrotask(() {
+        if (!mounted || _pendingTouchFullScreenToggle != touchPending) return;
+        _pendingTouchFullScreenToggle = null;
+        if (_activeTouchPointers.isEmpty &&
+            !plPlayerController.controlsLock.value &&
+            isFullScreen == touchPending.wasFullScreen) {
+          plPlayerController.triggerFullScreen(status: touchPending.target);
+        }
+      });
+    }
     final pending = _pendingFullScreenToggle;
     if (pending == null || event.buttons != 0) {
       return;
@@ -1521,6 +1559,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
+    _activeTouchPointers.remove(event.pointer);
+    _pendingTouchFullScreenToggle = null;
     _pendingFullScreenToggle = null;
   }
 
@@ -2187,10 +2227,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                                     if (!plPlayerController
                                         .controlsLock
                                         .value) {
-                                      plPlayerController.seekTo(
-                                        position,
-                                        isSeek: false,
-                                      );
+                                      plPlayerController.seekTo(position);
                                     }
                                   }
                                 : null,
@@ -2799,10 +2836,8 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
                     Icons.gps_fixed_outlined,
                     color: Colors.white,
                   ),
-                  onTap: () => plPlayerController.seekTo(
-                    Duration(seconds: seekOffset),
-                    isSeek: false,
-                  ),
+                  onTap: () =>
+                      plPlayerController.seekTo(Duration(seconds: seekOffset)),
                 ),
             ],
             LiveDanmaku() => [

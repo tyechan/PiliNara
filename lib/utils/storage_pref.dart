@@ -16,7 +16,7 @@ import 'package:PiliPlus/models/common/member/tab_type.dart';
 import 'package:PiliPlus/models/common/mine_tab_type.dart';
 import 'package:PiliPlus/models/common/msg/msg_unread_type.dart';
 import 'package:PiliPlus/models/common/nav_bar_config.dart';
-import 'package:PiliPlus/models/common/rcmd_mode.dart';
+import 'package:PiliPlus/models/common/rcmd_source.dart';
 import 'package:PiliPlus/models/common/reply/reply_sort_type.dart';
 import 'package:PiliPlus/models/common/sponsor_block/segment_type.dart';
 import 'package:PiliPlus/models/common/sponsor_block/skip_type.dart';
@@ -52,6 +52,16 @@ import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:material_ui/material_ui.dart';
+
+/// 关键词过滤规则列表的匹配入口，语义等价于逐项独立匹配、命中任一。
+extension RegExpListMatch on List<RegExp> {
+  bool hasMatch(String input) {
+    for (final rule in this) {
+      if (rule.hasMatch(input)) return true;
+    }
+    return false;
+  }
+}
 
 abstract final class Pref {
   static final Box _setting = GStorage.setting;
@@ -517,14 +527,33 @@ abstract final class Pref {
   static bool get appRcmd =>
       _setting.get(SettingBoxKey.appRcmd, defaultValue: true);
 
-  /// 推荐流模式，首次读取时从旧 key appRcmd 迁移
-  static RcmdMode get rcmdMode {
-    final index = _setting.get(SettingBoxKey.rcmdMode);
-    if (index != null) {
-      return RcmdMode.values.elementAtOrNull(index) ?? RcmdMode.app;
+  static List<RcmdSource> get rcmdSources {
+    final stored = _setting.get(SettingBoxKey.rcmdSources);
+    if (stored is List) {
+      final sources = <RcmdSource>[];
+      for (final name in stored) {
+        final source = RcmdSource.values.where((e) => e.name == name).firstOrNull;
+        if (source != null && !sources.contains(source)) sources.add(source);
+      }
+      if (sources.isNotEmpty) return sources;
     }
-    // 旧版迁移：appRcmd true→App, false→Web
-    return appRcmd ? RcmdMode.app : RcmdMode.web;
+    // 本地旧模式的 2 是 App+Web，上游旧来源的 2 是 PC。
+    switch (_setting.get(SettingBoxKey.rcmdMode)) {
+      case 0: return [RcmdSource.app];
+      case 1: return [RcmdSource.web];
+      case 2: return [RcmdSource.app, RcmdSource.web];
+    }
+    final legacy = _setting.get(SettingBoxKey.rcmdSource);
+    if (legacy is int && legacy >= 0 && legacy < RcmdSource.values.length) {
+      return [RcmdSource.values[legacy]];
+    }
+    return [appRcmd ? RcmdSource.app : RcmdSource.web];
+  }
+
+  static Future<void> setRcmdSources(List<RcmdSource> sources) async {
+    if (sources.isEmpty) return;
+    await _setting.put(SettingBoxKey.rcmdSources,
+        sources.map((e) => e.name).toSet().toList());
   }
 
   static bool get removeBlockedRcmd =>
@@ -1049,24 +1078,17 @@ abstract final class Pref {
   static String get banWordForDyn =>
       _setting.get(SettingBoxKey.banWordForDyn, defaultValue: '');
 
-  /// Helper method to parse ban word storage format into regex pattern
-  /// Supports both old (pipe-separated) and new (newline-separated) formats
-  /// Returns a regex pattern string with proper alternation
-  static String parseBanWordToRegex(String stored) {
-    if (stored.isEmpty) return '';
-
-    List<String> items;
-
-    // Check if it's the old pipe-separated format (no newlines)
+  /// 解析关键词存储串，返回列表项。
+  /// 支持旧格式（`|` 分隔）与新格式（`\n` 分隔）。
+  static List<String> parseBanWordItems(String stored) {
+    if (stored.isEmpty) return const [];
+    // 不含换行但含 `|`：可能是旧格式的多关键词，也可能是用户手写的一条正则
     if (!stored.contains('\n') && stored.contains('|')) {
-      // Old format: pipe-separated
-      // Heuristic: if it looks like multiple short items, it's old format
       final parts = stored
           .split('|')
           .map((e) => e.trim())
           .where((e) => e.isNotEmpty)
           .toList();
-
       if (parts.length > 1) {
         final hasComplexRegex = parts.any(
           (p) =>
@@ -1077,39 +1099,42 @@ abstract final class Pref {
               p.contains('^') ||
               p.contains('\$'),
         );
-
-        if (!hasComplexRegex) {
-          // Old format with simple keywords
-          items = parts;
-        } else {
-          // Single complex regex - use as-is
-          return stored;
-        }
+        // 含正则语法时整串视作一条正则，不拆
+        if (hasComplexRegex) return [stored];
       } else {
-        // Single item, keep as-is
-        return stored;
+        return [stored];
       }
-    } else {
-      // New format: newline-separated
-      items = stored
-          .split('\n')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty)
-          .toList();
+      return parts;
     }
+    return stored
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
 
-    if (items.isEmpty) return '';
+  /// 逐项编译关键词为独立正则，命中任一即过滤。
+  /// 单项非法时只跳过该项，不影响同列表其他项。
+  static List<RegExp> compileBanWord(String stored) {
+    final rules = <RegExp>[];
+    for (final item in parseBanWordItems(stored)) {
+      try {
+        rules.add(RegExp(item, caseSensitive: false));
+      } on FormatException catch (e) {
+        debugPrint('Invalid ban word pattern ignored: $item ($e)');
+      }
+    }
+    return rules;
+  }
 
-    // Build regex by joining all patterns with alternation
-    return items
-        .map((item) {
-          // If the item contains '|' and isn't already grouped, wrap it
-          if (item.contains('|') && !item.startsWith('(')) {
-            return '($item)';
-          }
-          return item;
-        })
-        .join('|');
+  /// 单项是否可以编译为正则，与 [compileBanWord] 使用同一套选项。
+  static bool isBanWordPatternValid(String pattern) {
+    try {
+      RegExp(pattern, caseSensitive: false);
+      return true;
+    } on FormatException {
+      return false;
+    }
   }
 
   static bool get enableLog =>
@@ -1198,6 +1223,9 @@ abstract final class Pref {
   static bool get autoPlayEnable =>
       _setting.get(SettingBoxKey.autoPlayEnable, defaultValue: false);
 
+  static bool get autoPlayWifiOnly =>
+      _setting.get(SettingBoxKey.autoPlayWifiOnly, defaultValue: false);
+
   static bool get pipNoDanmaku =>
       _setting.get(SettingBoxKey.pipNoDanmaku, defaultValue: false);
 
@@ -1243,7 +1271,6 @@ abstract final class Pref {
   static double get sideBarThreshold =>
       (_setting.get(SettingBoxKey.sideBarThreshold, defaultValue: 600.0) as num)
           .toDouble();
-
   static bool get hideSideBarLabel =>
       _setting.get(SettingBoxKey.hideSideBarLabel, defaultValue: false);
 
@@ -1837,4 +1864,13 @@ abstract final class Pref {
 
   static bool get filterIntro =>
       _setting.get(SettingBoxKey.filterIntro, defaultValue: false);
+
+  static int get foldDepth =>
+      _setting.get(SettingBoxKey.foldDepth, defaultValue: 0);
+
+  static bool get showRefreshFAB =>
+      _setting.get(SettingBoxKey.showRefreshFAB, defaultValue: true);
+
+  static bool get cachePlayInfo =>
+      _setting.get(SettingBoxKey.cachePlayInfo, defaultValue: true);
 }
