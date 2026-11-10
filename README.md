@@ -31,11 +31,11 @@
 
 ## 版本与更新
 
-- `versionName`：`<上游版本>-MMDDa`（例如 `2.6.2-1110a`，不超过 16 字符）
+- `versionName`：`<上游版本>-MMDDa`（例如 `2.6.2-1110b`，不超过 16 字符）
 - 关于页一行：`2.6.2 · 1110 · <短哈希>`
-- `versionCode`：`YYYYMMDD` + 当日序号，例如 `2026111001`
-- Git 标签：`v2.6.2-1110a+<短哈希>`
-- `pubspec.yaml` 的 `version` 只能是 Dart semver（`2.6.2+2026111001`）。真正写进 APK、关于页和日志的是 `lib/build_config.dart` 里的 `2.6.2-1110a`，由 `build_fork.sh` 用 `--build-name` 传给 Flutter。
+- `versionCode`：`YYYYMMDD` + 当日序号，例如 `2026111002`
+- Git 标签：`v2.6.2-1110b+<短哈希>`
+- `pubspec.yaml` 的 `version` 只能是 Dart semver（`2.6.2+2026111002`）。真正写进 APK、关于页和日志的是 `lib/build_config.dart` 里的 `2.6.2-1110b`，由 `build_fork.sh` 用 `--build-name` 传给 Flutter。
 - 应用内检查更新只看本仓库 Release，用 `versionCode` 比较，不再用官方构建时间。
 
 ## 如何同步上游
@@ -69,7 +69,7 @@ flutter test test/plugin/pl_player/player_controls_widget_test.dart \
 ```bash
 bash lib/scripts/build_fork.sh
 flutter build apk --release --split-per-abi \
-  --build-name=2.6.2-1110a --build-number=2026111001 \
+  --build-name=2.6.2-1110b --build-number=2026111002 \
   --dart-define-from-file=pili_release.json
 ```
 

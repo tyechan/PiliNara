@@ -85,9 +85,9 @@ void main() {
     expect(BuildConfig.displayVersion.length, lessThanOrEqualTo(24));
     expect(BuildConfig.displayVersion, '2.6.2 · 1110 · dev');
     expect(BuildConfig.versionName.length, lessThanOrEqualTo(16));
-    expect(BuildConfig.versionName, '2.6.2-1110a');
-    expect(VodProxyLog.bootLine, contains('2.6.2-1110a'));
-    expect(VodProxyLog.bootLine, contains('2026111001'));
+    expect(BuildConfig.versionName, '2.6.2-1110b');
+    expect(VodProxyLog.bootLine, contains('2.6.2-1110b'));
+    expect(VodProxyLog.bootLine, contains('2026111002'));
     expect(BuildConfig.displayVersion, contains('2.6.2 · 1110'));
     expect(BuildConfig.displayVersion.split('\n'), hasLength(1));
     expect(VodProxyLog.safeTitle('audio2'), '-');

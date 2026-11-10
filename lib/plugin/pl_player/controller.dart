@@ -32,6 +32,7 @@ import 'package:PiliPlus/plugin/pl_player/models/speed_lock_hint.dart';
 import 'package:PiliPlus/plugin/pl_player/models/video_fit_type.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/danmaku_options.dart';
 import 'package:PiliPlus/plugin/pl_player/utils/fullscreen.dart';
+import 'package:PiliPlus/plugin/pl_player/utils/orientation_policy.dart';
 import 'package:PiliPlus/plugin/vod_proxy/playback_diag.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_http_proxy.dart';
 import 'package:PiliPlus/plugin/vod_proxy/vod_lavf.dart';
@@ -765,17 +766,31 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
   }
 
   void _onOrientationChanged(OrientationParams param) {
-    _orientation = param.orientation;
+    final orientation = param.orientation;
+    // Reverse portrait is never an applied orientation. Do not map it to
+    // portraitUp: that drops a landscape video when the user rolls onto
+    // their side (gravity says portraitDown, the phone in their hands has
+    // not turned). Landscape left/right and upright portrait are unchanged.
+    if (orientation == .portraitDown) {
+      if (shouldHoldLandscapeOnReversePortrait(
+        isFullScreen: this.isFullScreen.value,
+        isVertical: _isVertical,
+        lastSensor: _orientation,
+        preferred: preferredOrientations,
+      )) {
+        // SCREEN_ORIENTATION_USER includes portrait, so the OS itself would
+        // fall through to upright portrait. Restrict to the two landscapes.
+        holdLandscapeAgainstReversePortrait();
+      }
+      return;
+    }
+    _orientation = orientation;
     if (Platform.isIOS && !visible) return;
     if (controlsLock.value) return;
-    final orientation = param.orientation;
     final isFullScreen = this.isFullScreen.value;
     if (checkIsAutoRotate &&
         param.isAutoRotate != true &&
-        (!isFullScreen ||
-            _isVertical ||
-            orientation == .portraitUp ||
-            orientation == .portraitDown)) {
+        (!isFullScreen || _isVertical || orientation == .portraitUp)) {
       return;
     }
     switch (orientation) {
@@ -788,15 +803,9 @@ class PlPlayerController with BlockConfigMixin, AudioNormalizationMixin {
           portraitUpMode();
         }
       case .portraitDown:
-        // Nobody holds a phone upside down. Follow the portraitUp path so the
-        // UI stays in normal portrait instead of SCREEN_ORIENTATION_REVERSE_PORTRAIT.
-        if (!horizontalScreen && !_isVertical && isFullScreen) {
-          if (!isManualFS) {
-            triggerFullScreen(status: false, orientation: .portraitUp);
-          }
-        } else {
-          portraitUpMode();
-        }
+        // Handled above, before `_orientation` is updated. Kept so the
+        // switch stays exhaustive: this value is not promoted away.
+        return;
       case .landscapeLeft:
         if (controlsLock.value && (lockFsRotation || _isVertical)) return;
         if (!horizontalScreen && !isFullScreen) {
