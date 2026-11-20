@@ -1195,6 +1195,7 @@ class _PLVideoPlayerState extends State<PLVideoPlayer>
     }
   }
 
+  /// Preview follows the finger. The player seeks once, here, on release.
   void _onHorizontalDragEnd() {
     if (plPlayerController.seekToPos case final seekToPos?) {
       feedBack();

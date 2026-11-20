@@ -17,6 +17,8 @@ class BackwardSeekIndicator extends StatefulWidget {
 }
 
 class BackwardSeekIndicatorState extends State<BackwardSeekIndicator> {
+  static const Duration accumulateDelay = Duration(milliseconds: 250);
+
   late Duration duration;
 
   Timer? timer;
@@ -25,7 +27,7 @@ class BackwardSeekIndicatorState extends State<BackwardSeekIndicator> {
   void initState() {
     super.initState();
     duration = widget.duration;
-    timer = Timer(const Duration(milliseconds: 400), () {
+    timer = Timer(accumulateDelay, () {
       widget.onSubmitted(duration);
     });
   }
@@ -38,7 +40,7 @@ class BackwardSeekIndicatorState extends State<BackwardSeekIndicator> {
 
   void increment() {
     timer?.cancel();
-    timer = Timer(const Duration(milliseconds: 400), () {
+    timer = Timer(accumulateDelay, () {
       widget.onSubmitted(duration);
     });
     setState(() {
