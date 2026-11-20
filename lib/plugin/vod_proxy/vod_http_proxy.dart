@@ -70,10 +70,14 @@ class VodHttpProxy {
   }
 
   void closeAll({String reason = 'close'}) {
+    // A new video must stop the previous session now. Parking it for
+    // lingerClosedFor kept the old CDN downloads running.
     final hard =
         reason == 'reset-test' ||
         reason == 'dispose' ||
-        reason == 'force-direct';
+        reason == 'force-direct' ||
+        reason == 'new-wrap' ||
+        reason == 'media-change';
     if (_sessions.isEmpty && (!hard || _lingering.isEmpty)) return;
     if (_sessions.isNotEmpty) {
       VodProxyLog.log('close reason=$reason n=${_sessions.length}');
@@ -296,6 +300,18 @@ class VodHttpProxy {
     );
     final videoSession = _sessions[videoId];
     if (videoSession == null) return null;
+    String? audioId;
+    VodSession? audioSession;
+    Future<int>? audioReady;
+    if (source.audioSource case final a? when a.isNotEmpty) {
+      audioId = _register(
+        kind: 'audio',
+        primary: a,
+        extras: source.audioCandidates,
+      );
+      audioSession = _sessions[audioId];
+      audioReady = audioSession?.ensureSize();
+    }
     try {
       await videoSession.ensureSize();
     } catch (e) {
@@ -304,26 +320,24 @@ class VodHttpProxy {
       videoSession.close(reason: 'probe-failed');
       _sessions.remove(videoId);
       _currentVideoId = null;
+      if (audioId != null) {
+        audioSession?.close(reason: 'probe-failed');
+        _sessions.remove(audioId);
+      }
       return null;
     }
     String? audio;
-    if (source.audioSource case final a? when a.isNotEmpty) {
-      final audioId = _register(
-        kind: 'audio',
-        primary: a,
-        extras: source.audioCandidates,
-      );
-      final audioSession = _sessions[audioId];
+    if (audioReady != null) {
       try {
-        await audioSession!.ensureSize();
-        audio = _url(audioId);
+        await audioReady;
+        audio = _url(audioId!);
         _currentAudioId = audioId;
       } catch (e) {
         VodProxyLog.log('probe-failed audio $e — using direct audio');
         audioSession?.fallbackReason = e.toString();
         audioSession?.close(reason: 'probe-failed');
         _sessions.remove(audioId);
-        audio = a;
+        audio = source.audioSource;
         _currentAudioId = null;
       }
     } else {

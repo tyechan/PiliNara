@@ -358,6 +358,28 @@ void main() {
     );
   });
 
+  test('next session seeds ranking from the previous host stats', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final first = VodHostPool([ali, hw], random: Random(1));
+    first.recordSuccess(
+      ali,
+      bytes: 512 * 1024,
+      elapsedMs: 200,
+      kind: 'video',
+    );
+    final seeded = first.hosts
+        .firstWhere((h) => h.host.contains('mirrorali'))
+        .emaBps;
+    expect(seeded, greaterThan(1));
+    final second = VodHostPool([hw, ali], random: Random(1));
+    expect(second.hosts.every((h) => h.emaBps == 0), isTrue);
+    second.seedFromHealth('video');
+    final again = second.hosts.firstWhere((h) => h.host.contains('mirrorali'));
+    expect(again.emaBps, seeded);
+    expect(second.preferredHost(kind: 'video')!.host, contains('mirrorali'));
+  });
+
   test('unban does not fire before the 30s floor', () {
     VodProxyLog.resetForTest();
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';

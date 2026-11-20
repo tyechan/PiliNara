@@ -181,6 +181,15 @@ class VodHostPool {
     return score;
   }
 
+  /// Copy the previous session's per-host throughput onto untouched stats.
+  void seedFromHealth(String kind) {
+    for (final h in _hosts) {
+      if (h.emaBps > 0) continue;
+      final bps = VodHostHealth.instance.seededBps(h.host, kind: kind);
+      if (bps != null && bps > 0) h.emaBps = bps;
+    }
+  }
+
   /// Session-local drop (akamai 403, etc.) — no loud ban line.
   void dropQuiet(String url, {required String reason}) {
     final stat = _find(url);
@@ -204,6 +213,7 @@ class VodHostPool {
     required int elapsedMs,
     int? ttfbMs,
     bool probe = false,
+    String? kind,
   }) {
     final stat = _find(url);
     if (stat == null) return;
@@ -215,6 +225,13 @@ class VodHostPool {
       final bps = bytes * 1000 / elapsedMs;
       stat.emaBps = stat.emaBps <= 0 ? bps : (stat.emaBps * 0.7 + bps * 0.3);
       if (bps > stat.peakBps) stat.peakBps = bps;
+      if (kind != null) {
+        VodHostHealth.instance.noteThroughput(
+          stat.host,
+          kind: kind,
+          bps: stat.emaBps,
+        );
+      }
     }
     if (probe) return;
     stat.successes++;
