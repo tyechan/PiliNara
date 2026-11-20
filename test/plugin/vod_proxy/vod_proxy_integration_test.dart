@@ -825,32 +825,36 @@ void main() {
     timeout: const Timeout(Duration(seconds: 25)),
   );
 
-  test('first valid probe unblocks while a slow host is still hanging', () async {
-    final slow = _MockCdn(
-      payload,
-      timeoutAt: 0,
-      timeoutFor: const Duration(seconds: 3),
-      hangEveryMatching: true,
-      advertiseHost: '127.0.0.1',
-    );
-    final fast = _MockCdn(payload, advertiseHost: 'localhost');
-    await slow.start();
-    await fast.start();
-    addTearDown(slow.stop);
-    addTearDown(fast.stop);
-    final sw = Stopwatch()..start();
-    final proxyUrl = await VodHttpProxy.instance.openRaw(
-      slow.url,
-      extras: [fast.url],
-      chunkSize: 16 * 1024,
-      workers: 2,
-    );
-    expect(proxyUrl, isNotNull);
-    expect(sw.elapsed, lessThan(const Duration(milliseconds: 1500)));
-    final got = await _fetchAll(proxyUrl!);
-    expect(got, payload);
-    expect(fast.requests, greaterThan(0));
-  }, timeout: const Timeout(Duration(seconds: 25)));
+  test(
+    'first valid probe unblocks while a slow host is still hanging',
+    () async {
+      final slow = _MockCdn(
+        payload,
+        timeoutAt: 0,
+        timeoutFor: const Duration(seconds: 3),
+        hangEveryMatching: true,
+        advertiseHost: '127.0.0.1',
+      );
+      final fast = _MockCdn(payload, advertiseHost: 'localhost');
+      await slow.start();
+      await fast.start();
+      addTearDown(slow.stop);
+      addTearDown(fast.stop);
+      final sw = Stopwatch()..start();
+      final proxyUrl = await VodHttpProxy.instance.openRaw(
+        slow.url,
+        extras: [fast.url],
+        chunkSize: 16 * 1024,
+        workers: 2,
+      );
+      expect(proxyUrl, isNotNull);
+      expect(sw.elapsed, lessThan(const Duration(milliseconds: 1500)));
+      final got = await _fetchAll(proxyUrl!);
+      expect(got, payload);
+      expect(fast.requests, greaterThan(0));
+    },
+    timeout: const Timeout(Duration(seconds: 25)),
+  );
 
   test('seek cancels prefetches outside the new window', () async {
     final big = Uint8List.fromList(
@@ -891,6 +895,98 @@ void main() {
       isTrue,
     );
   }, timeout: const Timeout(Duration(seconds: 25)));
+
+  test('seek does not wait out a hung connect', () async {
+    final big = Uint8List.fromList(
+      List<int>.generate(256 * 1024, (i) => i & 0xff),
+    );
+    final bad = _MockCdn(big, advertiseHost: '127.0.0.1');
+    final good = _MockCdn(big, advertiseHost: 'localhost');
+    await bad.start();
+    await good.start();
+    addTearDown(bad.stop);
+    addTearDown(good.stop);
+    final real = HttpClient();
+    addTearDown(real.close);
+    var badOpens = 0;
+    VodHttpProxy.instance.debugOpenRequest = (uri, {required bool urgent}) {
+      if (uri.host == '127.0.0.1') {
+        badOpens++;
+        if (badOpens > 1) {
+          return Future<HttpClientRequest>.delayed(
+            const Duration(seconds: 8),
+            () => throw const SocketException('connect timed out'),
+          );
+        }
+      }
+      return real.getUrl(uri);
+    };
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      bad.url,
+      extras: [good.url],
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    final session = VodHttpProxy.instance.debugSessions.first;
+    session.pool.hosts.firstWhere((h) => h.host == '127.0.0.1').emaBps = 1e12;
+    session.pool.hosts.firstWhere((h) => h.host == 'localhost').emaBps = 1;
+    const start = 200 * 1024;
+    const end = (start ~/ (16 * 1024) + 1) * 16 * 1024;
+    final sw = Stopwatch()..start();
+    final chunks = await session.read(start, end).toList();
+    expect(sw.elapsed, lessThan(const Duration(milliseconds: 2500)));
+    final got = BytesBuilder(copy: false);
+    for (final chunk in chunks) {
+      if (chunk.isNotEmpty) got.add(chunk);
+    }
+    expect(got.takeBytes(), big.sublist(start, end));
+    expect(VodProxyLog.memoryLines.any((l) => l.contains('hedge id=')), isTrue);
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('ban host=127.0.0.1')),
+      isTrue,
+    );
+    expect(good.requests, greaterThan(0));
+  }, timeout: const Timeout(Duration(seconds: 20)));
+
+  test('a background probe connect failure bans that node', () async {
+    final bad = _MockCdn(payload, advertiseHost: '127.0.0.1');
+    final good = _MockCdn(payload, advertiseHost: 'localhost');
+    await bad.start();
+    await good.start();
+    addTearDown(bad.stop);
+    addTearDown(good.stop);
+    final real = HttpClient();
+    addTearDown(real.close);
+    VodHttpProxy.instance.debugOpenRequest = (uri, {required bool urgent}) {
+      if (uri.host == '127.0.0.1') {
+        return Future<HttpClientRequest>.delayed(
+          const Duration(seconds: 8),
+          () => throw const SocketException('connect timed out'),
+        );
+      }
+      return real.getUrl(uri);
+    };
+    final sw = Stopwatch()..start();
+    final proxyUrl = await VodHttpProxy.instance.openRaw(
+      bad.url,
+      extras: [good.url],
+      chunkSize: 16 * 1024,
+      workers: 2,
+    );
+    expect(proxyUrl, isNotNull);
+    expect(sw.elapsed, lessThan(const Duration(milliseconds: 1500)));
+    final banned = Stopwatch()..start();
+    while (banned.elapsed < const Duration(seconds: 5) &&
+        !VodProxyLog.memoryLines.any((l) => l.contains('ban host=127.0.0.1'))) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    expect(
+      VodProxyLog.memoryLines.any((l) => l.contains('ban host=127.0.0.1')),
+      isTrue,
+    );
+    expect(banned.elapsed, lessThan(const Duration(seconds: 4)));
+  }, timeout: const Timeout(Duration(seconds: 20)));
 
   test('direct CDN URL still plays (toggle-off path)', () async {
     final cdn = _MockCdn(payload);

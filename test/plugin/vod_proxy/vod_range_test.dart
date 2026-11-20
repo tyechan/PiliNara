@@ -200,6 +200,32 @@ void main() {
     expect(pool.describe(), contains('mirrorhw'));
   });
 
+  test('one connect failure bans the host for 45s', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw], random: Random(1));
+    expect(
+      pool.banConnect(ali, reason: 'SocketException: connect timed out'),
+      isTrue,
+    );
+    expect(
+      pool.available.map((h) => h.host),
+      isNot(contains('upos-sz-mirrorali.bilivideo.com')),
+    );
+    expect(pool.pickUrl(kind: 'video'), contains('mirrorhw'));
+    final until = pool.hosts
+        .firstWhere((h) => h.host.contains('mirrorali'))
+        .blacklistedUntil!;
+    expect(
+      until.difference(DateTime.now()).inSeconds,
+      inInclusiveRange(40, 45),
+    );
+    expect(
+      pool.banConnect(ali, reason: 'SocketException: connect timed out'),
+      isFalse,
+    );
+  });
+
   test('3 timeouts in 30s ban even when successes interleave', () {
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
     const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';

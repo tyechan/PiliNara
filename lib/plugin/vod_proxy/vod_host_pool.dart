@@ -6,8 +6,7 @@ import 'package:PiliPlus/plugin/vod_proxy/vod_range.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
 
 class VodHostStat {
-  VodHostStat(this.url)
-    : host = (Uri.tryParse(url)?.host ?? url).toLowerCase();
+  VodHostStat(this.url) : host = (Uri.tryParse(url)?.host ?? url).toLowerCase();
 
   final String url;
   final String host;
@@ -241,6 +240,38 @@ class VodHostPool {
     stat.chunkSuccesses++;
   }
 
+  /// One connect failure or connect/header timeout is enough to skip this
+  /// host for [ban] (30–60s). Probe failures count too; pass
+  /// [countChunk] false so a probe-only host stays out of traffic stats.
+  /// Returns false when the host is already banned.
+  bool banConnect(
+    String url, {
+    required String reason,
+    Duration ban = const Duration(seconds: 45),
+    bool countChunk = true,
+  }) {
+    final stat = _find(url);
+    if (stat == null) return false;
+    _refreshBans();
+    if (stat.blacklistedUntil != null) return false;
+    stat.errors++;
+    if (countChunk) {
+      stat.chunkErrors++;
+      stat.consecutiveErrors++;
+    }
+    final now = DateTime.now();
+    stat.bannedAt = now;
+    stat.blacklistedUntil = now.add(ban);
+    stat.lastBanReason = reason;
+    banReasons.add('${stat.host}:$reason');
+    VodHostHealth.instance.noteBan(stat.host, cooldown: ban);
+    VodProxyLog.log(
+      'ban host=${stat.host} reason=$reason cooldown=${ban.inSeconds}s',
+    );
+    onBan?.call(stat.host);
+    return true;
+  }
+
   /// Returns true when this failure newly bans the host.
   bool recordFailure(
     String url, {
@@ -301,12 +332,13 @@ class VodHostPool {
       final until = h.blacklistedUntil;
       if (until == null) continue;
       final started = h.bannedAt;
-      if (started != null &&
-          now.difference(started) < defaultBan) {
+      if (started != null && now.difference(started) < defaultBan) {
         continue;
       }
       if (!now.isBefore(until)) {
-        final lived = started == null ? until.difference(now).inSeconds.abs() : now.difference(started).inSeconds;
+        final lived = started == null
+            ? until.difference(now).inSeconds.abs()
+            : now.difference(started).inSeconds;
         h.blacklistedUntil = null;
         h.bannedAt = null;
         h.consecutiveErrors = 0;

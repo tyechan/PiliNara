@@ -28,6 +28,10 @@ class VodHttpProxy {
   DateTime? lastRequestAt;
   int requestsServed = 0;
   void Function()? onCursorStuck;
+
+  /// Test hook for a host whose TCP connect never completes.
+  Future<HttpClientRequest> Function(Uri uri, {required bool urgent})?
+  debugOpenRequest;
   Future<void> _wrapTail = Future<void>.value();
   Timer? _orphanWatch;
   String? _currentVideoId;
@@ -198,6 +202,7 @@ class VodHttpProxy {
     requestsServed = 0;
     lastRequestAt = null;
     onCursorStuck = null;
+    debugOpenRequest = null;
     orphanAfter = defaultOrphanAfter;
     _currentVideoId = null;
     _currentAudioId = null;
@@ -474,6 +479,7 @@ class VodHttpProxy {
       backBufferBytes: backBufferBytes,
     );
     session.onCursorStuck = () => onCursorStuck?.call();
+    session.debugOpenRequest = debugOpenRequest;
     session.noteClient();
     _sessions[id] = session;
     _syncOrphanWatch();

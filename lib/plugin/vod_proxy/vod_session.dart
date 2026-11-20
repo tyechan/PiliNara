@@ -55,11 +55,30 @@ class VodSession {
   final int backBufferBytes;
   void Function()? onCursorStuck;
 
-  final HttpClient _client = HttpClient()
-    ..userAgent = BrowserUa.pc
-    ..connectionTimeout = const Duration(seconds: 8)
-    ..idleTimeout = const Duration(seconds: 20)
-    ..autoUncompress = false;
+  /// Playhead connects die here, not at the 8s client default.
+  static const Duration urgentConnectTimeout = Duration(milliseconds: 1500);
+
+  /// Start a second node when the playhead chunk has produced no bytes.
+  static const Duration playheadHedgeAfter = Duration(seconds: 1);
+
+  static const Duration connectBanFor = Duration(seconds: 45);
+
+  final HttpClient _client = _openClient(const Duration(seconds: 8));
+
+  final HttpClient _urgentClient = _openClient(urgentConnectTimeout);
+
+  static HttpClient _openClient(Duration connectTimeout) {
+    return HttpClient()
+      ..userAgent = BrowserUa.pc
+      ..connectionTimeout = connectTimeout
+      ..idleTimeout = const Duration(seconds: 20)
+      ..autoUncompress = false;
+  }
+
+  /// Test hook. When set, replaces `HttpClient.getUrl` so a host can hang
+  /// in TCP connect without a blackhole route.
+  Future<HttpClientRequest> Function(Uri uri, {required bool urgent})?
+  debugOpenRequest;
 
   final Map<int, Uint8List> _chunks = {};
   final Map<int, Future<Uint8List>> _inflight = {};
@@ -90,6 +109,7 @@ class VodSession {
   final Map<int, Uint8List> _partial = {};
   final Map<int, int> _fetchGen = {};
   final Map<int, HttpClientRequest> _requests = {};
+  final Map<int, List<_ReqBox>> _boxes = {};
   HttpClientRequest? _probeRequest;
   Object? _probeSeedOwner;
   int _seedInstalled = 0;
@@ -339,6 +359,16 @@ class VodSession {
         VodProxyLog.log(
           'probe id=$id host=${stat.host} status=skip reason=403',
         );
+      } else if (_connectLike(e)) {
+        pool.banConnect(
+          stat.url,
+          reason: 'probe $e',
+          ban: connectBanFor,
+          countChunk: false,
+        );
+        VodProxyLog.log(
+          'probe id=$id host=${stat.host} status=fail reason=$e',
+        );
       } else {
         pool.recordFailure(stat.url, reason: 'probe $e', probe: true);
         VodProxyLog.log(
@@ -557,6 +587,12 @@ class VodSession {
     _inflight.remove(idx);
     _inflightHost.remove(idx);
     _partial.remove(idx);
+    final boxes = _boxes.remove(idx);
+    if (boxes != null) {
+      for (final box in boxes) {
+        _abortBox(box);
+      }
+    }
     try {
       req?.abort(const _FetchCancelled());
     } catch (_) {}
@@ -572,6 +608,8 @@ class VodSession {
       if (_closed) return;
       if (_winnerCovers(range.start)) continue;
       final idx = range.start ~/ chunkSize;
+      // The cursor chunk is fetched as urgent so a hung connect can be hedged.
+      if (idx == from ~/ chunkSize) continue;
       if (_chunks.containsKey(idx) || _inflight.containsKey(idx)) continue;
       if (_partial[idx]?.length == _chunkLen(idx)) continue;
       if (_inflight.length >= workers) break;
@@ -607,7 +645,8 @@ class VodSession {
   Future<Uint8List> _chunk(int idx, {bool urgent = false}) {
     final expected = _chunkLen(idx);
     final cached = _chunks[idx];
-    if (cached != null && cached.length == expected) return Future.value(cached);
+    if (cached != null && cached.length == expected)
+      return Future.value(cached);
     return _inflight.putIfAbsent(idx, () async {
       final gen = _fetchGen[idx] ?? 0;
       try {
@@ -625,19 +664,19 @@ class VodSession {
           final have = _haveBytes(idx);
           final start = chunkStart + have;
           if (start >= end) break;
-          await _fetchRange(
-            ByteRange(start, end),
-            urgent: urgent,
-            liveIdx: idx,
-            fetchGen: gen,
-            onFileBytes: (offset, slice) {
-              if ((_fetchGen[idx] ?? 0) != gen) return;
-              final want = chunkStart + _haveBytes(idx);
-              if (offset != want) return;
-              _appendPartial(idx, slice);
-              _promoteIfComplete(idx);
-            },
-          );
+          if (urgent) {
+            await _fetchPlayhead(idx, gen, ByteRange(start, end));
+          } else {
+            await _fetchRange(
+              ByteRange(start, end),
+              urgent: false,
+              liveIdx: idx,
+              fetchGen: gen,
+              onFileBytes: (offset, slice) {
+                _acceptFileBytes(idx, gen, offset, slice);
+              },
+            );
+          }
           if (_haveBytes(idx) <= have) {
             throw StateError('no-progress idx=$idx at=$have');
           }
@@ -659,6 +698,247 @@ class VodSession {
         }
       }
     });
+  }
+
+  void _acceptFileBytes(int idx, int gen, int offset, Uint8List slice) {
+    if ((_fetchGen[idx] ?? 0) != gen || slice.isEmpty) return;
+    final want = idx * chunkSize + _haveBytes(idx);
+    if (offset != want) return;
+    _appendPartial(idx, slice);
+    _promoteIfComplete(idx);
+  }
+
+  bool _connectLike(Object error) {
+    if (error is TimeoutException ||
+        error is SocketException ||
+        error is HandshakeException ||
+        error is TlsException) {
+      return true;
+    }
+    final text = error.toString();
+    return text.contains('Connection closed') ||
+        text.contains('Connection refused') ||
+        text.contains('Connection timed out') ||
+        text.contains('connect timed out');
+  }
+
+  void _trackBox(int idx, _ReqBox box) {
+    _boxes.putIfAbsent(idx, () => <_ReqBox>[]).add(box);
+  }
+
+  void _dropBox(int idx, _ReqBox box) {
+    _boxes[idx]?.remove(box);
+  }
+
+  /// Playhead fetch. Connect and headers share one deadline, and if no bytes
+  /// arrive within [playheadHedgeAfter] the remaining range is also requested
+  /// from the next-best node. The first contiguous bytes win; the other
+  /// request is aborted.
+  Future<void> _fetchPlayhead(int idx, int gen, ByteRange range) async {
+    final urlA = _pickHost(null);
+    if (urlA == null) {
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      throw StateError('no-host');
+    }
+    final before = _haveBytes(idx);
+    final boxA = _ReqBox();
+    _ReqBox? boxB;
+    var dropA = false;
+    var dropB = false;
+    var doneA = false;
+    var doneB = false;
+    Object? errorA;
+    Object? errorB;
+
+    void take(int source, int offset, Uint8List slice) {
+      if (source == 1 && dropA) return;
+      if (source == 2 && dropB) return;
+      final want = idx * chunkSize + _haveBytes(idx);
+      final had = _haveBytes(idx);
+      _acceptFileBytes(idx, gen, offset, slice);
+      if (_haveBytes(idx) <= had || offset != want) return;
+      _bytesNet += slice.length;
+      if (source == 1) {
+        dropB = true;
+        final other = boxB;
+        if (other != null) _abortBox(other);
+      } else {
+        dropA = true;
+        _abortBox(boxA);
+      }
+    }
+
+    final futA = _getOrKick(
+      urlA,
+      range,
+      urgent: true,
+      liveIdx: idx,
+      fetchGen: gen,
+      onFileBytes: (offset, slice) => take(1, offset, slice),
+      abandoned: () => dropA,
+      box: boxA,
+      track: idx,
+    );
+    unawaited(
+      futA.then<void>(
+        (_) {
+          doneA = true;
+        },
+        onError: (Object e) {
+          doneA = true;
+          errorA = e;
+        },
+      ),
+    );
+
+    Future<void> waitUntil(bool Function() stop) async {
+      while (!stop()) {
+        if (_closed) throw const _SessionClosed();
+        if ((_fetchGen[idx] ?? 0) != gen) throw const _FetchCancelled();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+      }
+    }
+
+    final hedgeAt = DateTime.now().add(playheadHedgeAfter);
+    await waitUntil(
+      () =>
+          _haveBytes(idx) > before ||
+          doneA ||
+          !DateTime.now().isBefore(hedgeAt),
+    );
+    if (_haveBytes(idx) > before) {
+      await _awaitLeader(futA, () => dropA);
+      return;
+    }
+    if (errorA is _SessionClosed) throw const _SessionClosed();
+    if (errorA is _FetchCancelled && (_fetchGen[idx] ?? 0) != gen) {
+      throw const _FetchCancelled();
+    }
+    final hostA = Uri.tryParse(urlA)?.host ?? urlA;
+    final urlB = _pickHost(hostA);
+    if (urlB == null || urlB == urlA) {
+      if (!doneA) {
+        try {
+          await futA;
+        } catch (e) {
+          _noteConnectFail(urlA, range, e);
+          rethrow;
+        }
+        return;
+      }
+      _noteConnectFail(urlA, range, errorA ?? 'no-bytes');
+      throw errorA ?? StateError('no-progress idx=$idx');
+    }
+    _noteConnectFail(
+      urlA,
+      range,
+      errorA ?? 'no-bytes ${playheadHedgeAfter.inMilliseconds}ms',
+    );
+    VodProxyLog.log(
+      'hedge id=$id idx=$idx range=$range from=$hostA '
+      'alt=${Uri.tryParse(urlB)?.host ?? urlB}',
+    );
+    retries++;
+    final hedgeBox = _ReqBox();
+    boxB = hedgeBox;
+    final futB = _getOrKick(
+      urlB,
+      range,
+      urgent: true,
+      liveIdx: idx,
+      fetchGen: gen,
+      onFileBytes: (offset, slice) => take(2, offset, slice),
+      abandoned: () => dropB,
+      box: hedgeBox,
+      track: idx,
+    );
+    unawaited(
+      futB.then<void>(
+        (_) {
+          doneB = true;
+        },
+        onError: (Object e) {
+          doneB = true;
+          errorB = e;
+        },
+      ),
+    );
+    await waitUntil(() => _haveBytes(idx) > before || (doneA && doneB));
+    if (_haveBytes(idx) > before) {
+      if (dropA) {
+        await _awaitLeader(futB, () => dropB);
+      } else {
+        dropB = true;
+        _abortBox(hedgeBox);
+        await _awaitLeader(futA, () => dropA);
+      }
+      return;
+    }
+    if (errorB is _SessionClosed) throw const _SessionClosed();
+    if (errorB is _FetchCancelled && (_fetchGen[idx] ?? 0) != gen) {
+      throw const _FetchCancelled();
+    }
+    _noteConnectFail(urlB, range, errorB ?? errorA ?? 'no-bytes');
+    throw errorB ?? errorA ?? StateError('no-progress idx=$idx');
+  }
+
+  Future<void> _awaitLeader<T>(
+    Future<T> future,
+    bool Function() dropped,
+  ) async {
+    try {
+      await future;
+    } on _FetchCancelled {
+      if (!dropped()) rethrow;
+    } on _HostKicked {
+      if (!dropped()) rethrow;
+    }
+  }
+
+  String? _pickHost(String? avoid) {
+    final allowBanned = pool.available.isEmpty;
+    var url = pool.pickUrl(
+      avoidHost: avoid,
+      allowBanned: allowBanned,
+      kind: kind,
+    );
+    if (url == null || url.isEmpty) {
+      final primary = pool.primaryUrl;
+      if (primary.isNotEmpty && (allowBanned || !pool.isUrlBanned(primary))) {
+        if (avoid == null || Uri.tryParse(primary)?.host != avoid) {
+          url = primary;
+        }
+      }
+    }
+    if (url == null || url.isEmpty) return null;
+    return url;
+  }
+
+  void _noteConnectFail(String url, ByteRange range, Object reason) {
+    if (reason is _SessionClosed ||
+        reason is _FetchCancelled ||
+        reason is _HostKicked) {
+      return;
+    }
+    if (!_connectLike(reason) && !reason.toString().startsWith('no-bytes')) {
+      _noteFetchFail(url, range, reason);
+      return;
+    }
+    final banned = pool.banConnect(
+      url,
+      reason: reason.toString(),
+      ban: connectBanFor,
+    );
+    VodProxyLog.log(
+      'retry id=$id range=$range from=${Uri.tryParse(url)?.host ?? url} '
+      'reason=$reason${banned ? '' : ' (already-banned)'}',
+    );
+  }
+
+  void _abortBox(_ReqBox box) {
+    try {
+      box.req?.abort(const _FetchCancelled());
+    } catch (_) {}
   }
 
   Duration _firstByteTimeout(bool urgent) {
@@ -796,10 +1076,14 @@ class VodSession {
     bool probe = false,
     void Function(int total, HttpClientRequest req)? onReady,
     void Function(int offset, Uint8List slice)? onFileBytes,
+    bool Function()? abandoned,
+    _ReqBox? box,
+    int? track,
   }) {
     final host = (Uri.tryParse(url)?.host ?? '').toLowerCase();
     final epochAtStart = _kickEpoch;
-    final box = _ReqBox();
+    final slot = box ?? _ReqBox();
+    if (track != null) _trackBox(track, slot);
     var stop = false;
     final future = _get(
       url,
@@ -810,7 +1094,8 @@ class VodSession {
       fetchGen: fetchGen,
       onReady: onReady,
       onFileBytes: onFileBytes,
-      box: box,
+      box: slot,
+      abandoned: abandoned,
     );
     // A second listener so the kick-watcher can stop. Its future must handle
     // the same error the caller awaits, or a timeout/cancel is also uncaught.
@@ -824,12 +1109,24 @@ class VodSession {
         },
       ),
     );
+    if (track != null) {
+      unawaited(
+        future.then<void>(
+          (_) {
+            _dropBox(track, slot);
+          },
+          onError: (_) {
+            _dropBox(track, slot);
+          },
+        ),
+      );
+    }
     void watchKick() {
       _wake.future.then((_) {
         if (stop) return;
         if (_kickEpoch != epochAtStart && _kickedHost == host) {
           try {
-            box.req?.abort(const _HostKicked());
+            slot.req?.abort(const _HostKicked());
           } catch (_) {}
           return;
         }
@@ -851,13 +1148,40 @@ class VodSession {
     void Function(int total, HttpClientRequest req)? onReady,
     void Function(int offset, Uint8List slice)? onFileBytes,
     _ReqBox? box,
+    bool Function()? abandoned,
     Duration? firstByteTimeout,
     Duration? stallTimeout,
   }) async {
     final firstByte = firstByteTimeout ?? _firstByteTimeout(urgent || probe);
     final stall = stallTimeout ?? _stallTimeout();
     final sw = Stopwatch()..start();
-    final req = await _client.getUrl(Uri.parse(url));
+    final deadline = DateTime.now().add(firstByte);
+    Duration left() {
+      final ms = deadline.difference(DateTime.now()).inMilliseconds;
+      return Duration(milliseconds: ms < 1 ? 0 : ms);
+    }
+
+    void giveUp(HttpClientRequest? request) {
+      if (abandoned?.call() != true) return;
+      try {
+        request?.abort(const _FetchCancelled());
+      } catch (_) {}
+      throw const _FetchCancelled();
+    }
+
+    final playhead = urgent && !probe;
+    final uri = Uri.parse(url);
+    final hook = debugOpenRequest;
+    final Future<HttpClientRequest> opening = hook != null
+        ? hook(uri, urgent: playhead)
+        : (playhead ? _urgentClient : _client).getUrl(uri);
+    final HttpClientRequest req;
+    try {
+      req = await opening.timeout(left());
+    } on TimeoutException {
+      throw TimeoutException('connect $range');
+    }
+    giveUp(req);
     box?.req = req;
     if (liveIdx != null) _requests[liveIdx] = req;
     req.headers.set(HttpHeaders.refererHeader, HttpString.baseUrl);
@@ -877,9 +1201,10 @@ class VodSession {
     }
 
     ensureLive();
+    giveUp(req);
     final HttpClientResponse resp;
     try {
-      resp = await req.close().timeout(firstByte);
+      resp = await req.close().timeout(left());
     } on TimeoutException {
       try {
         req.abort(TimeoutException('headers'));
@@ -935,6 +1260,9 @@ class VodSession {
     try {
       while (taken < expect) {
         ensureLive();
+        if (abandoned?.call() == true) {
+          giveUp(req);
+        }
         if (_kickEpoch != 0 &&
             box != null &&
             _kickedHost == (Uri.tryParse(url)?.host ?? '').toLowerCase() &&
@@ -1064,7 +1392,15 @@ class VodSession {
         req.abort(const _SessionClosed());
       } catch (_) {}
     }
+    for (final boxes in _boxes.values) {
+      for (final box in boxes) {
+        try {
+          box.req?.abort(const _SessionClosed());
+        } catch (_) {}
+      }
+    }
     _requests.clear();
+    _boxes.clear();
     _wakeWaiters();
     logSessionEnd(reason: reason);
     _chunks.clear();
@@ -1072,6 +1408,7 @@ class VodSession {
     _inflight.clear();
     _inflightHost.clear();
     _client.close(force: true);
+    _urgentClient.close(force: true);
   }
 }
 
