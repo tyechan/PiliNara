@@ -105,19 +105,21 @@ class ZanButtonGrpc extends StatelessWidget {
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       visualDensity: VisualDensity.compact,
     );
-    @pragma('vm:prefer-inline')
     Future<void> wrapProcessing(
       Future<void> Function(
         BuildContext context, {
         required bool isLike,
         required bool isDislike,
       })
-      onLikeOrDislike,
+      action,
     ) async {
       if (isProcessing) return;
       isProcessing = true;
-      await onLikeOrDislike(context, isLike: isLike, isDislike: isDislike);
-      isProcessing = false;
+      try {
+        await action(context, isLike: isLike, isDislike: isDislike);
+      } finally {
+        isProcessing = false;
+      }
     }
 
     final dislikeBtn = SizedBox(
@@ -129,9 +131,7 @@ class ZanButtonGrpc extends StatelessWidget {
           padding: WidgetStatePropertyAll(.zero),
           minimumSize: WidgetStatePropertyAll(.square(40)),
         ),
-        onPressed: isLogin
-            ? () => wrapProcessing(onHateReply)
-            : _toastNotLogin,
+        onPressed: isLogin ? () => wrapProcessing(onHateReply) : _toastNotLogin,
         child: Icon(
           isDislike
               ? FontAwesomeIcons.solidThumbsDown

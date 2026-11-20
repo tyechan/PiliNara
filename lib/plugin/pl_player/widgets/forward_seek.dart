@@ -17,6 +17,10 @@ class ForwardSeekIndicator extends StatefulWidget {
 }
 
 class ForwardSeekIndicatorState extends State<ForwardSeekIndicator> {
+  /// Long enough to stack a few double-taps, short enough that ±5s starts
+  /// before the old 400ms hold.
+  static const Duration accumulateDelay = Duration(milliseconds: 250);
+
   late Duration duration;
 
   Timer? timer;
@@ -25,7 +29,7 @@ class ForwardSeekIndicatorState extends State<ForwardSeekIndicator> {
   void initState() {
     super.initState();
     duration = widget.duration;
-    timer = Timer(const Duration(milliseconds: 400), () {
+    timer = Timer(accumulateDelay, () {
       widget.onSubmitted(duration);
     });
   }
@@ -38,7 +42,7 @@ class ForwardSeekIndicatorState extends State<ForwardSeekIndicator> {
 
   void increment() {
     timer?.cancel();
-    timer = Timer(const Duration(milliseconds: 400), () {
+    timer = Timer(accumulateDelay, () {
       widget.onSubmitted(duration);
     });
     setState(() {

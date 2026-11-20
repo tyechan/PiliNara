@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:math';
 
 import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/scroll_physics.dart' show ReloadMixin;
@@ -169,13 +168,7 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       _partIndex = 0;
     }
 
-    final int? seasonCid = pages != null && pages.isNotEmpty
-        ? (data.listOrder.isDesc
-              ? pages.last.cid
-              : data.listOrder.isShuffle
-              ? data.cid
-              : pages.first.cid)
-        : data.cid;
+    final seasonCid = data.cid;
     if (force || _seasonCid != seasonCid) {
       _seasonCid = seasonCid;
       final season = data.ugcSeason;
@@ -226,10 +219,10 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
     if (result case Success(:final response)) {
       late final stat = videoDetail.value.stat;
       if (response.like!) {
-        stat?.like = max(1, stat.like);
+        stat?.like = math.max(1, stat.like);
       }
       if (response.favorite!) {
-        stat?.favorite = max(1, stat.favorite);
+        stat?.favorite = math.max(1, stat.favorite);
       }
       hasLike.value = response.like!;
       hasDislike.value = response.dislike!;
@@ -677,7 +670,8 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
 
     // 列表循环
     if (prevIndex < 0) {
-      if (isPart && (videoDetailCtr.isPlayAll || videoDetail.hasSeason)) {
+      if (isPart &&
+          (videoDetailCtr.isPlayAll || videoDetail.ugcSeason != null)) {
         return prevPlay(skipPart: true, manual: manual);
       }
       if (_isShuffleMode(isPart)) {
@@ -858,4 +852,5 @@ class UgcIntroController extends CommonIntroController with ReloadMixin {
       videoDetail.value.owner?.mid,
     );
   }
+
 }

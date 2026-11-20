@@ -8,6 +8,7 @@ abstract final class SettingBoxKey {
       defaultAudioQa = 'defaultAudioQa',
       defaultAudioQaCellular = 'defaultAudioQaCellular',
       autoPlayEnable = 'autoPlayEnable',
+      autoPlayWifiOnly = 'autoPlayWifiOnly',
       fullScreenMode = 'fullScreenMode',
       preferCodecs = 'preferCodecs',
       preferCodecsCellular = 'preferCodecsCellular',
@@ -31,7 +32,9 @@ abstract final class SettingBoxKey {
       enableAutoExit = 'enableAutoExit',
       enableOnlineTotal = 'enableOnlineTotal',
       enableDmCount = 'enableDmCount',
+      superChatType = 'superChatType',
       superChatTimeType = 'superChatTimeType',
+      fullScreenSCWidth = 'fullScreenSCWidth',
       keyboardControl = 'keyboardControl',
       pauseOnMinimize = 'pauseOnMinimize',
       pgcSkipType = 'pgcSkipType',
@@ -67,6 +70,8 @@ abstract final class SettingBoxKey {
       autoAudioOnlyInBackground = 'autoAudioOnlyInBackground',
       appRcmd = 'appRcmd',
       rcmdMode = 'rcmdMode',
+      rcmdSource = 'rcmdSource',
+      rcmdSources = 'rcmdSources',
       enableSaveLastData = 'enableSaveLastData',
       minDurationForRcmd = 'minDurationForRcmd',
       minPlayForRcmd = 'minPlayForRcmd',
@@ -193,6 +198,7 @@ abstract final class SettingBoxKey {
       appVolume = 'appVolume',
       enableVolumeBoost = 'enableVolumeBoost',
       downloadPath = 'downloadPath',
+      cachePlayInfo = 'cachePlayInfo',
       imageSavePath = 'imageSavePath',
       followOrderType = 'followOrderType',
       enableImgMenu = 'enableImgMenu',
@@ -210,13 +216,8 @@ abstract final class SettingBoxKey {
       buvid = 'buvid',
       blockAtOnlyReply = 'blockAtOnlyReply',
       blockReplyAtCount = 'blockReplyAtCount',
-      filterIntro = 'filterIntro';
-
-  static const String superChatType = 'superChatType',
-      enableFullScreenSC = 'enableFullScreenSC',
-      fullScreenSCOpacity = 'fullScreenSCOpacity',
-      fullScreenSCScale = 'fullScreenSCScale',
-      fullScreenSCWidth = 'fullScreenSCWidth';
+      filterIntro = 'filterIntro',
+      showRefreshFAB = 'showRefreshFAB';
 
   static const String enableAiChat = 'enableAiChat',
       aiApiUrl = 'aiApiUrl',
@@ -227,6 +228,10 @@ abstract final class SettingBoxKey {
       aiPromptTemplates = 'aiPromptTemplates',
       aiAutoScroll = 'aiAutoScroll',
       aiReasoningEffort = 'aiReasoningEffort';
+
+  static const String enableFullScreenSC = 'enableFullScreenSC',
+      fullScreenSCOpacity = 'fullScreenSCOpacity',
+      fullScreenSCScale = 'fullScreenSCScale';
 
   static const String minimizeOnExit = 'minimizeOnExit',
       windowSize = 'windowSize',
@@ -346,6 +351,7 @@ abstract final class SettingBoxKey {
       liveCdnUrl = 'liveCdnUrl',
       saveReply = 'saveReply',
       swapReplyLikeDislike = 'swapReplyLikeDislike',
+      foldDepth = 'foldDepth',
       remarkReplaceName = 'remarkReplaceName',
       appFont = 'appFont',
       customAppFont = 'customAppFont',

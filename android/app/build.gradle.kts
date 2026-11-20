@@ -19,7 +19,13 @@ if (!isBuiltInKotlinEnabled) {
 
 android {
     namespace = "com.example.pilinara"
-    compileSdk = 37
+    // SDK platform 37 is published as android-37.0. An integer compileSdk
+    // still asks for android-37, which current sdkmanager no longer ships.
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

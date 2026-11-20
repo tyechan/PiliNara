@@ -1,6 +1,7 @@
 import 'package:PiliPlus/common/assets.dart';
 import 'package:PiliPlus/common/style.dart';
 import 'package:PiliPlus/common/widgets/badge.dart';
+import 'package:PiliPlus/common/widgets/button/icon_button.dart';
 import 'package:PiliPlus/common/widgets/dialog/dialog.dart';
 import 'package:PiliPlus/common/widgets/flutter/popup_menu.dart';
 import 'package:PiliPlus/common/widgets/image/network_img_layer.dart';
@@ -133,54 +134,74 @@ class _DownloadPanelState extends State<DownloadPanel> {
       padding: const EdgeInsets.fromLTRB(16, 12, 0, 12),
       child: Row(
         children: [
-          Expanded(
-            child: Row(
-              spacing: 12,
-              children: [
-                Text('画质', style: textStyle),
-                Builder(
-                  builder: (context) => StaticPopupMenuButton<VideoQuality>(
-                    initialValue: _quality,
-                    onSelected: (value) {
-                      _quality = value;
-                      (context as Element).markNeedsBuild();
-                    },
-                    itemBuilder: (context) => VideoQuality.values
-                        .map(
-                          (e) => PopupMenuItem(
-                            value: e,
-                            child: Text(e.desc),
-                          ),
-                        )
-                        .toList(),
-                    child: _buildPopupMenuChild(_quality.desc),
-                  ),
-                ),
-                Text('音质', style: textStyle),
-                Builder(
-                  builder: (context) => StaticPopupMenuButton<AudioQuality>(
-                    initialValue: _audioQuality,
-                    onSelected: (value) {
-                      _audioQuality = value;
-                      (context as Element).markNeedsBuild();
-                    },
-                    itemBuilder: (context) => AudioQuality.values
-                        .map(
-                          (e) => PopupMenuItem(
-                            value: e,
-                            child: Text(e.desc),
-                          ),
-                        )
-                        .toList(),
-                    child: _buildPopupMenuChild(_audioQuality.desc),
-                  ),
-                ),
-              ],
+          Text(
+            '目标画质',
+            style: textStyle,
+          ),
+          Builder(
+            builder: (context) => StaticPopupMenuButton<VideoQuality>(
+              initialValue: _quality,
+              onSelected: (value) {
+                _quality = value;
+                (context as Element).markNeedsBuild();
+              },
+              itemBuilder: (context) => VideoQuality.values
+                  .map(
+                    (e) => PopupMenuItem(
+                      value: e,
+                      child: Text(e.desc),
+                    ),
+                  )
+                  .toList(),
+              child: _buildPopupMenuChild(_quality.desc),
             ),
           ),
-          if (PlatformUtils.isMobile)
+          const SizedBox(width: 16),
+          Text(
+            '目标音质',
+            style: textStyle,
+          ),
+          Builder(
+            builder: (context) => StaticPopupMenuButton<AudioQuality>(
+              initialValue: _audioQuality,
+              onSelected: (value) {
+                _audioQuality = value;
+                (context as Element).markNeedsBuild();
+              },
+              itemBuilder: (context) => AudioQuality.values
+                  .map(
+                    (e) => PopupMenuItem(
+                      value: e,
+                      child: Text(e.desc),
+                    ),
+                  )
+                  .toList(),
+              child: _buildPopupMenuChild(_audioQuality.desc),
+            ),
+          ),
+          Builder(
+            builder: (context) => iconButton(
+              size: 34,
+              iconSize: 20,
+              tooltip: '缓存字幕/分段',
+              onPressed: () {
+                _downloadService.toggleCachePlayInfo();
+                (context as Element).markNeedsBuild();
+              },
+              icon: Icon(
+                _downloadService.cachePlayInfo
+                    ? Icons.subtitles_outlined
+                    : Icons.subtitles_off_outlined,
+                color: _downloadService.cachePlayInfo
+                    ? colorScheme.onSurfaceVariant
+                    : colorScheme.outline,
+              ),
+            ),
+          ),
+          if (PlatformUtils.isMobile) ...[
+            const Spacer(),
             Padding(
-              padding: const .only(right: 16),
+              padding: const .only(left: 6, right: 16),
               child: StreamBuilder(
                 stream: Connectivity().onConnectivityChanged,
                 builder: (context, snapshot) {
@@ -196,10 +217,10 @@ class _DownloadPanelState extends State<DownloadPanel> {
                   return const SizedBox.shrink();
                 },
               ),
-            )
-          else if (kDebugMode)
+            ),
+          ] else if (kDebugMode)
             Padding(
-              padding: const .only(right: 16),
+              padding: const .only(left: 6, right: 16),
               child: Icon(
                 Icons.wifi,
                 size: 20,

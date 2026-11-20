@@ -43,6 +43,7 @@ extension ListExt<T> on List<T> {
     return List<R>.from(this);
   }
 
+  /// 取满足 [test] 的最大项；没有满足项时回落到全体最大值（fork 半屏画质规则用）
   T findClosestTarget(
     bool Function(T) test,
     T Function(T, T) combine,

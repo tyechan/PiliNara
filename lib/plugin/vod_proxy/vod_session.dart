@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' show max, min;
+import 'dart:math' show min;
 import 'dart:typed_data';
 
 import 'package:PiliPlus/http/browser_ua.dart';
@@ -35,6 +35,7 @@ class VodSession {
   }) : pool = VodHostPool(candidates),
        backBufferBytes = backBufferBytes ?? defaultBackBuffer(windowBytes) {
     pool.onBan = (host) => _kickFetches(fromHost: host);
+    pool.seedFromHealth(kind);
   }
 
   static const int minBackBufferBytes = 192 * 1024 * 1024;
@@ -54,11 +55,30 @@ class VodSession {
   final int backBufferBytes;
   void Function()? onCursorStuck;
 
-  final HttpClient _client = HttpClient()
-    ..userAgent = BrowserUa.pc
-    ..connectionTimeout = const Duration(seconds: 8)
-    ..idleTimeout = const Duration(seconds: 20)
-    ..autoUncompress = false;
+  /// Playhead connects die here, not at the 8s client default.
+  static const Duration urgentConnectTimeout = Duration(milliseconds: 1500);
+
+  /// Start a second node when the playhead chunk has produced no bytes.
+  static const Duration playheadHedgeAfter = Duration(seconds: 1);
+
+  static const Duration connectBanFor = Duration(seconds: 45);
+
+  final HttpClient _client = _openClient(const Duration(seconds: 8));
+
+  final HttpClient _urgentClient = _openClient(urgentConnectTimeout);
+
+  static HttpClient _openClient(Duration connectTimeout) {
+    return HttpClient()
+      ..userAgent = BrowserUa.pc
+      ..connectionTimeout = connectTimeout
+      ..idleTimeout = const Duration(seconds: 20)
+      ..autoUncompress = false;
+  }
+
+  /// Test hook. When set, replaces `HttpClient.getUrl` so a host can hang
+  /// in TCP connect without a blackhole route.
+  Future<HttpClientRequest> Function(Uri uri, {required bool urgent})?
+  debugOpenRequest;
 
   final Map<int, Uint8List> _chunks = {};
   final Map<int, Future<Uint8List>> _inflight = {};
@@ -86,6 +106,16 @@ class VodSession {
   String? _kickedHost;
   final Map<int, String> _inflightHost = {};
   bool _statsPaused = false;
+  final Map<int, Uint8List> _partial = {};
+  final Map<int, int> _fetchGen = {};
+  final Map<int, HttpClientRequest> _requests = {};
+  final Map<int, List<_ReqBox>> _boxes = {};
+  HttpClientRequest? _probeRequest;
+  Object? _probeSeedOwner;
+  int _seedInstalled = 0;
+  int _winnerProbeEnd = 0;
+  bool _winnerBodyDone = true;
+  Future<void>? _winnerBody;
 
   bool get isClosed => _closed;
 
@@ -96,6 +126,8 @@ class VodSession {
   bool get statsPaused => _statsPaused;
 
   int get activeReads => _activeReads;
+
+  int get inflightCount => _inflight.length;
 
   DateTime? lastClientAt;
 
@@ -212,6 +244,11 @@ class VodSession {
     return '${(n / 1024).toStringAsFixed(0)}KB';
   }
 
+  static const int probeBytes = 128 * 1024;
+
+  bool _winnerCovers(int filePos) =>
+      !_winnerBodyDone && _winnerProbeEnd > 0 && filePos < _winnerProbeEnd;
+
   Future<int> ensureSize({
     Duration timeout = const Duration(seconds: 6),
   }) async {
@@ -244,46 +281,111 @@ class VodSession {
   Future<void> _probeHosts() async {
     if (_probed || _closed) return;
     _probed = true;
+    pool.seedFromHealth(kind);
     final targets = pool.hosts.take(8).toList();
     if (targets.isEmpty) return;
-    const probeBytes = 128 * 1024;
-    await Future.wait(
-      targets.map((stat) async {
-        if (_closed) return;
-        try {
-          final result = await _get(
-            stat.url,
-            ByteRange(0, probeBytes),
-            probe: true,
-          ).timeout(const Duration(seconds: 3));
-          fileSize ??= result.total;
-          final thruMbps = stat.emaBps * 8 / 1e6;
-          if (kind == 'video') {
-            VodHostHealth.instance.noteVideoProbe(
-              stat.host,
-              ttfbMs: stat.avgTtfbMs,
-              thruMbps: thruMbps,
-            );
+    final firstOk = Completer<void>();
+    var left = targets.length;
+    for (final stat in targets) {
+      unawaited(
+        _probeOne(stat, firstOk, () {
+          left--;
+          if (left == 0) {
+            if (!firstOk.isCompleted) firstOk.complete();
+            _logProbeRank();
           }
-          VodProxyLog.log(
-            'probe id=$id host=${stat.host} ttfb=${stat.avgTtfbMs.toStringAsFixed(0)}ms '
-            'thru=${thruMbps.toStringAsFixed(2)}Mbps status=ok',
-          );
-        } catch (e) {
-          if (e is _Forbidden) {
-            pool.dropQuiet(stat.url, reason: '403');
-            VodProxyLog.log(
-              'probe id=$id host=${stat.host} status=skip reason=403',
-            );
-            return;
+        }),
+      );
+    }
+    await firstOk.future;
+  }
+
+  Future<void> _probeOne(
+    VodHostStat stat,
+    Completer<void> firstOk,
+    void Function() done,
+  ) async {
+    final bodyDone = Completer<void>();
+    var won = false;
+    try {
+      if (_closed) return;
+      await _get(
+        stat.url,
+        const ByteRange(0, probeBytes),
+        probe: true,
+        firstByteTimeout: const Duration(seconds: 3),
+        stallTimeout: const Duration(seconds: 3),
+        onReady: (total, req) {
+          fileSize ??= total;
+          if (_probeSeedOwner == null) {
+            _probeSeedOwner = stat;
+            won = true;
+            _probeRequest = req;
+            _winnerBodyDone = false;
+            _winnerBody = bodyDone.future;
+            _winnerProbeEnd = total > 0 && total < probeBytes
+                ? total
+                : probeBytes;
+            if (!firstOk.isCompleted) firstOk.complete();
           }
-          pool.recordFailure(stat.url, reason: 'probe $e', probe: true);
-          VodProxyLog.log(
-            'probe id=$id host=${stat.host} status=fail reason=$e',
-          );
-        }
-      }),
-    );
+        },
+        onFileBytes: (offset, slice) {
+          if (!identical(_probeSeedOwner, stat)) return;
+          if (offset != _seedInstalled) return;
+          _installSeed(slice, offset);
+          _seedInstalled += slice.length;
+        },
+      );
+      if (!identical(_probeSeedOwner, stat) && !won) {
+        // Another host already unblocked startup. This one only ranks.
+      }
+      final thruMbps = stat.emaBps * 8 / 1e6;
+      if (kind == 'video') {
+        VodHostHealth.instance.noteVideoProbe(
+          stat.host,
+          ttfbMs: stat.avgTtfbMs,
+          thruMbps: thruMbps,
+        );
+      }
+      VodProxyLog.log(
+        'probe id=$id host=${stat.host} ttfb=${stat.avgTtfbMs.toStringAsFixed(0)}ms '
+        'thru=${thruMbps.toStringAsFixed(2)}Mbps status=ok',
+      );
+    } on _FetchCancelled {
+      // Seek moved off the opening bytes, or the session closed.
+    } catch (e) {
+      if (e is _Forbidden) {
+        pool.dropQuiet(stat.url, reason: '403');
+        VodProxyLog.log(
+          'probe id=$id host=${stat.host} status=skip reason=403',
+        );
+      } else if (_connectLike(e)) {
+        pool.banConnect(
+          stat.url,
+          reason: 'probe $e',
+          ban: connectBanFor,
+          countChunk: false,
+        );
+        VodProxyLog.log(
+          'probe id=$id host=${stat.host} status=fail reason=$e',
+        );
+      } else {
+        pool.recordFailure(stat.url, reason: 'probe $e', probe: true);
+        VodProxyLog.log(
+          'probe id=$id host=${stat.host} status=fail reason=$e',
+        );
+      }
+    } finally {
+      if (won || identical(_probeSeedOwner, stat)) {
+        _winnerBodyDone = true;
+        _probeRequest = null;
+        if (!bodyDone.isCompleted) bodyDone.complete();
+      }
+      done();
+    }
+  }
+
+  void _logProbeRank() {
     if (_closed) return;
     pool.markOverseasWinnerIfNeeded();
     final ranked = pool.topHosts(k: 6, kind: kind);
@@ -297,6 +399,64 @@ class VodSession {
     );
   }
 
+  void _installSeed(Uint8List bytes, int fileStart) {
+    if (bytes.isEmpty || fileStart < 0) return;
+    var off = 0;
+    var pos = fileStart;
+    while (off < bytes.length) {
+      final size = fileSize;
+      if (size != null && pos >= size) break;
+      final idx = pos ~/ chunkSize;
+      final into = pos - idx * chunkSize;
+      final full = _chunks[idx];
+      final expected = _chunkLen(idx);
+      if (full != null && full.length == expected) {
+        final skip = full.length - into;
+        if (skip <= 0 || off + skip > bytes.length) break;
+        off += skip;
+        pos += skip;
+        continue;
+      }
+      final existing = _partial[idx]?.length ?? 0;
+      if (into != existing) return;
+      final room = expected - existing;
+      if (room <= 0) return;
+      final take = min(room, bytes.length - off);
+      _appendPartial(idx, Uint8List.sublistView(bytes, off, off + take));
+      _promoteIfComplete(idx);
+      off += take;
+      pos += take;
+    }
+  }
+
+  void _appendPartial(int idx, Uint8List slice) {
+    if (slice.isEmpty) return;
+    final prev = _partial[idx];
+    if (prev == null) {
+      _partial[idx] = Uint8List.fromList(slice);
+    } else {
+      final merged = Uint8List(prev.length + slice.length);
+      merged.setRange(0, prev.length, prev);
+      merged.setRange(prev.length, merged.length, slice);
+      _partial[idx] = merged;
+    }
+    _wakeWaiters();
+  }
+
+  void _promoteIfComplete(int idx) {
+    final part = _partial[idx];
+    if (part == null) return;
+    final expected = _chunkLen(idx);
+    if (part.length != expected) return;
+    _chunks[idx] = part;
+    _partial.remove(idx);
+    _fetchedChunks.add(idx);
+    _noteFetchedExtent(idx);
+    _wakeWaiters();
+  }
+
+  Uint8List? _bytesReady(int idx) => _chunks[idx] ?? _partial[idx];
+
   Stream<List<int>> read(int start, int endExclusive) async* {
     if (_closed) return;
     final epoch = ++_readEpoch;
@@ -304,54 +464,138 @@ class VodSession {
     startStats();
     _cursor = start;
     if (start > _highWater) _highWater = start;
+    if (start >= _winnerProbeEnd) _abortProbeBody();
+    _cancelOutsideWindow(start);
     _evict();
     unawaited(_prefetch(start));
+    final deadline = DateTime.now().add(fetchBudget);
+    var stuckSignaled = false;
+    var lastProgress = DateTime.now();
     try {
       var pos = start;
       while (!_closed && epoch == _readEpoch && pos < endExclusive) {
         final idx = pos ~/ chunkSize;
         final expected = _chunkLen(idx);
-        final Uint8List chunk;
-        try {
-          chunk = await _chunkUntil(
-            idx,
-            urgent: pos == start,
-            epoch: epoch,
-          );
-        } on _SessionClosed {
-          return;
-        }
-        if (_closed || epoch != _readEpoch) return;
-        if (chunk.length != expected) {
-          throw VodServeAbort(
-            ByteRange(idx * chunkSize, idx * chunkSize + expected),
-            'bad-length got=${chunk.length} want=$expected',
-          );
-        }
         final offset = pos - idx * chunkSize;
-        if (offset < 0 || offset >= chunk.length) {
+        final ready = _bytesReady(idx);
+        if (ready != null && ready.length > offset) {
+          final take = min(ready.length - offset, endExclusive - pos);
+          if (take <= 0) {
+            throw VodServeAbort(ByteRange(pos, endExclusive), 'empty-take');
+          }
+          yield Uint8List.fromList(
+            Uint8List.sublistView(ready, offset, offset + take),
+          );
+          pos += take;
+          _cursor = pos;
+          if (pos > _highWater) _highWater = pos;
+          _bytesDelivered += take;
+          if (ready.length == expected ||
+              (_chunks[idx]?.length ?? 0) == expected) {
+            _servedChunks.add(idx);
+          }
+          lastServeAt = DateTime.now();
+          lastProgress = DateTime.now();
+          stuckSignaled = false;
+          _evict();
+          unawaited(_prefetch(pos));
+          continue;
+        }
+        if (DateTime.now().isAfter(deadline)) {
           throw VodServeAbort(
             ByteRange(pos, endExclusive),
-            'bad-offset offset=$offset len=${chunk.length}',
+            'deadline ${fetchBudget.inSeconds}s',
           );
         }
-        final take = min(chunk.length - offset, endExclusive - pos);
-        if (take <= 0) {
-          throw VodServeAbort(ByteRange(pos, endExclusive), 'empty-take');
+        if (_winnerCovers(pos)) {
+          final wake = _wake.future;
+          final winner = _winnerBody ?? Future<void>.value();
+          await Future.any<void>([wake, winner]);
+          if (_closed || epoch != _readEpoch) return;
+          // async* cancel does not interrupt an await. An empty event lets a
+          // dropped client stop this generator; the HTTP handler skips it.
+          yield Uint8List(0);
+          continue;
         }
-        yield chunk.sublist(offset, offset + take);
-        pos += take;
-        _cursor = pos;
-        if (pos > _highWater) _highWater = pos;
-        _bytesDelivered += take;
-        _servedChunks.add(idx);
-        lastServeAt = DateTime.now();
-        _evict();
-        unawaited(_prefetch(pos));
+        if (!_inflight.containsKey(idx)) {
+          unawaited(
+            _chunk(idx, urgent: true).then<void>(
+              (_) {},
+              onError: (Object e) {
+                if (e is _SessionClosed || e is _FetchCancelled) return;
+                VodProxyLog.log('cursor-fail id=$id idx=$idx $e');
+              },
+            ),
+          );
+        }
+        final quietFor = DateTime.now().difference(lastProgress);
+        if (!stuckSignaled && quietFor >= const Duration(seconds: 15)) {
+          stuckSignaled = true;
+          VodProxyLog.log(
+            'abort id=$id range=${ByteRange(pos, endExclusive)} '
+            'reason=cursor-watchdog — holding client',
+          );
+          onCursorStuck?.call();
+        }
+        final wake = _wake.future;
+        await Future.any<void>([
+          wake,
+          Future<void>.delayed(const Duration(milliseconds: 200)),
+        ]);
+        if (_closed || epoch != _readEpoch) return;
+        yield Uint8List(0);
       }
     } finally {
       _activeReads = (_activeReads - 1).clamp(0, 1 << 20);
     }
+  }
+
+  void _abortProbeBody() {
+    if (_winnerBodyDone) return;
+    _winnerBodyDone = true;
+    final req = _probeRequest;
+    _probeRequest = null;
+    try {
+      req?.abort(const _FetchCancelled());
+    } catch (_) {}
+    if (_winnerBody != null) {
+      // The probe future completes itself in finally.
+    }
+  }
+
+  void _cancelOutsideWindow(int from) {
+    final size = fileSize;
+    final until = size == null
+        ? from + windowBytes
+        : min(from + windowBytes, size);
+    final lo = from ~/ chunkSize;
+    var hi = lo;
+    if (until > from) hi = (until - 1) ~/ chunkSize;
+    final drop = <int>[
+      for (final idx in _inflight.keys)
+        if (idx < lo || idx > hi) idx,
+    ];
+    for (final idx in drop) {
+      _abortChunk(idx);
+      VodProxyLog.log('cancel-prefetch id=$id idx=$idx');
+    }
+  }
+
+  void _abortChunk(int idx) {
+    _fetchGen[idx] = (_fetchGen[idx] ?? 0) + 1;
+    final req = _requests.remove(idx);
+    _inflight.remove(idx);
+    _inflightHost.remove(idx);
+    _partial.remove(idx);
+    final boxes = _boxes.remove(idx);
+    if (boxes != null) {
+      for (final box in boxes) {
+        _abortBox(box);
+      }
+    }
+    try {
+      req?.abort(const _FetchCancelled());
+    } catch (_) {}
   }
 
   Future<void> _prefetch(int from) async {
@@ -362,8 +606,12 @@ class VodSession {
     var launched = 0;
     for (final range in ranges) {
       if (_closed) return;
+      if (_winnerCovers(range.start)) continue;
       final idx = range.start ~/ chunkSize;
+      // The cursor chunk is fetched as urgent so a hung connect can be hedged.
+      if (idx == from ~/ chunkSize) continue;
       if (_chunks.containsKey(idx) || _inflight.containsKey(idx)) continue;
+      if (_partial[idx]?.length == _chunkLen(idx)) continue;
       if (_inflight.length >= workers) break;
       unawaited(_chunkQuiet(idx));
       launched++;
@@ -376,84 +624,11 @@ class VodSession {
       await _chunk(idx);
     } on _SessionClosed {
       // Player moved on; in-flight Range work is expected to stop.
+    } on _FetchCancelled {
+      // Seek left this chunk's window.
     } catch (e) {
       VodProxyLog.log('prefetch-fail id=$id idx=$idx $e');
     }
-  }
-
-  Future<Uint8List> _chunkUntil(
-    int idx, {
-    required bool urgent,
-    required int epoch,
-  }) async {
-    final deadline = DateTime.now().add(fetchBudget);
-    final started = DateTime.now();
-    final expected = _chunkLen(idx);
-    final range = ByteRange(idx * chunkSize, idx * chunkSize + expected);
-    Object? lastError;
-    var raced = false;
-    var stuckSignaled = false;
-    while (!_closed && epoch == _readEpoch) {
-      final cached = _chunks[idx];
-      if (cached != null) {
-        if (cached.length == expected) return cached;
-        _chunks.remove(idx);
-        lastError = 'bad-length got=${cached.length} want=$expected';
-      }
-      final remaining = deadline.difference(DateTime.now());
-      if (remaining.inMilliseconds <= 0) {
-        throw VodServeAbort(
-          range,
-          lastError ?? 'deadline ${fetchBudget.inSeconds}s',
-        );
-      }
-      if (lastError is VodServeAbort) throw lastError as VodServeAbort;
-
-      unawaited(
-        _chunk(idx, urgent: urgent).then<void>(
-          (_) {},
-          onError: (Object e) {
-            lastError = e;
-          },
-        ),
-      );
-
-      final slice = remaining < cursorWatchdog ? remaining : cursorWatchdog;
-      try {
-        final inflight = _inflight[idx];
-        await Future.any<void>([
-          if (inflight != null) inflight.then<void>((_) {}),
-          Future<void>.delayed(slice),
-          _wake.future,
-        ]);
-      } catch (_) {}
-
-      final ready = _chunks[idx];
-      if (ready != null && ready.length == expected) return ready;
-      if (lastError is VodServeAbort) throw lastError as VodServeAbort;
-      if (_closed || epoch != _readEpoch) throw const _SessionClosed();
-
-      final waited = DateTime.now().difference(started);
-      if (!raced && waited >= cursorWatchdog) {
-        raced = true;
-        final avoid = _inflightHost[idx];
-        VodProxyLog.log(
-          'watchdog id=$id idx=$idx range=$range '
-          'reason=no-progress ${cursorWatchdog.inMilliseconds}ms race',
-        );
-        unawaited(_raceChunk(idx, avoidHost: avoid));
-        unawaited(_raceChunk(idx + 1, avoidHost: avoid));
-      } else if (raced &&
-          !stuckSignaled &&
-          waited >= const Duration(seconds: 15)) {
-        stuckSignaled = true;
-        VodProxyLog.log(
-          'abort id=$id range=$range reason=cursor-watchdog — holding client',
-        );
-        onCursorStuck?.call();
-      }
-    }
-    throw const _SessionClosed();
   }
 
   void _noteFetchedExtent(int idx) {
@@ -461,83 +636,341 @@ class VodSession {
     if (end > _highWater) _highWater = end;
   }
 
-  Future<void> _raceChunk(int idx, {String? avoidHost}) async {
-    try {
-      final expected = _chunkLen(idx);
-      final cached = _chunks[idx];
-      if (cached != null && cached.length == expected) return;
-      final size = fileSize;
-      if (size == null || size <= 0) return;
-      final start = idx * chunkSize;
-      final end = min(start + chunkSize, size);
-      final fetched = await _fetchRange(
-        ByteRange(start, end),
-        urgent: true,
-        avoidHost: avoidHost,
-      );
-      final want = end - start;
-      if (fetched.bytes.length != want) return;
-      _chunks[idx] = fetched.bytes;
-      _fetchedChunks.add(idx);
-      _noteFetchedExtent(idx);
-      _wakeWaiters();
-    } on _SessionClosed {
-      // Player moved on.
-    } catch (e) {
-      VodProxyLog.log('race-fail id=$id idx=$idx $e');
-    }
+  int _haveBytes(int idx) {
+    final full = _chunks[idx];
+    if (full != null) return full.length;
+    return _partial[idx]?.length ?? 0;
   }
 
   Future<Uint8List> _chunk(int idx, {bool urgent = false}) {
-    final cached = _chunks[idx];
     final expected = _chunkLen(idx);
-    if (cached != null) {
-      if (cached.length == expected) return Future.value(cached);
-      _chunks.remove(idx);
-    }
+    final cached = _chunks[idx];
+    if (cached != null && cached.length == expected)
+      return Future.value(cached);
     return _inflight.putIfAbsent(idx, () async {
+      final gen = _fetchGen[idx] ?? 0;
       try {
         if (_closed) throw const _SessionClosed();
         final size = fileSize ?? await ensureSize();
         if (_closed) throw const _SessionClosed();
+        if ((_fetchGen[idx] ?? 0) != gen) throw const _FetchCancelled();
         if (_fetchedChunks.contains(idx) && !_chunks.containsKey(idx)) {
           VodProxyLog.log('refetch id=$id idx=$idx reason=evicted');
         }
-        final start = idx * chunkSize;
-        final end = min(start + chunkSize, size);
-        final want = end - start;
-        final fetched = await _fetchRange(
-          ByteRange(start, end),
-          urgent: urgent,
-        );
-        if (fetched.bytes.length != want) {
+        final chunkStart = idx * chunkSize;
+        final end = min(chunkStart + chunkSize, size);
+        while (_haveBytes(idx) < end - chunkStart) {
+          if ((_fetchGen[idx] ?? 0) != gen) throw const _FetchCancelled();
+          final have = _haveBytes(idx);
+          final start = chunkStart + have;
+          if (start >= end) break;
+          if (urgent) {
+            await _fetchPlayhead(idx, gen, ByteRange(start, end));
+          } else {
+            await _fetchRange(
+              ByteRange(start, end),
+              urgent: false,
+              liveIdx: idx,
+              fetchGen: gen,
+              onFileBytes: (offset, slice) {
+                _acceptFileBytes(idx, gen, offset, slice);
+              },
+            );
+          }
+          if (_haveBytes(idx) <= have) {
+            throw StateError('no-progress idx=$idx at=$have');
+          }
+        }
+        _promoteIfComplete(idx);
+        final done = _chunks[idx];
+        final want = end - chunkStart;
+        if (done == null || done.length != want) {
           throw StateError(
-            'chunk-len got=${fetched.bytes.length} want=$want',
+            'chunk-len got=${done?.length ?? _haveBytes(idx)} want=$want',
           );
         }
-        fileSize ??= fetched.total;
-        _chunks[idx] = fetched.bytes;
-        _fetchedChunks.add(idx);
-        _noteFetchedExtent(idx);
-        return fetched.bytes;
+        return done;
       } finally {
-        _inflight.remove(idx);
+        if ((_fetchGen[idx] ?? 0) == gen) {
+          _inflight.remove(idx);
+          _requests.remove(idx);
+          _inflightHost.remove(idx);
+        }
       }
     });
   }
+
+  void _acceptFileBytes(int idx, int gen, int offset, Uint8List slice) {
+    if ((_fetchGen[idx] ?? 0) != gen || slice.isEmpty) return;
+    final want = idx * chunkSize + _haveBytes(idx);
+    if (offset != want) return;
+    _appendPartial(idx, slice);
+    _promoteIfComplete(idx);
+  }
+
+  bool _connectLike(Object error) {
+    if (error is TimeoutException ||
+        error is SocketException ||
+        error is HandshakeException ||
+        error is TlsException) {
+      return true;
+    }
+    final text = error.toString();
+    return text.contains('Connection closed') ||
+        text.contains('Connection refused') ||
+        text.contains('Connection timed out') ||
+        text.contains('connect timed out');
+  }
+
+  void _trackBox(int idx, _ReqBox box) {
+    _boxes.putIfAbsent(idx, () => <_ReqBox>[]).add(box);
+  }
+
+  void _dropBox(int idx, _ReqBox box) {
+    _boxes[idx]?.remove(box);
+  }
+
+  /// Playhead fetch. Connect and headers share one deadline, and if no bytes
+  /// arrive within [playheadHedgeAfter] the remaining range is also requested
+  /// from the next-best node. The first contiguous bytes win; the other
+  /// request is aborted.
+  Future<void> _fetchPlayhead(int idx, int gen, ByteRange range) async {
+    final urlA = _pickHost(null);
+    if (urlA == null) {
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      throw StateError('no-host');
+    }
+    final before = _haveBytes(idx);
+    final boxA = _ReqBox();
+    _ReqBox? boxB;
+    var dropA = false;
+    var dropB = false;
+    var doneA = false;
+    var doneB = false;
+    Object? errorA;
+    Object? errorB;
+
+    void take(int source, int offset, Uint8List slice) {
+      if (source == 1 && dropA) return;
+      if (source == 2 && dropB) return;
+      final want = idx * chunkSize + _haveBytes(idx);
+      final had = _haveBytes(idx);
+      _acceptFileBytes(idx, gen, offset, slice);
+      if (_haveBytes(idx) <= had || offset != want) return;
+      _bytesNet += slice.length;
+      if (source == 1) {
+        dropB = true;
+        final other = boxB;
+        if (other != null) _abortBox(other);
+      } else {
+        dropA = true;
+        _abortBox(boxA);
+      }
+    }
+
+    final futA = _getOrKick(
+      urlA,
+      range,
+      urgent: true,
+      liveIdx: idx,
+      fetchGen: gen,
+      onFileBytes: (offset, slice) => take(1, offset, slice),
+      abandoned: () => dropA,
+      box: boxA,
+      track: idx,
+    );
+    unawaited(
+      futA.then<void>(
+        (_) {
+          doneA = true;
+        },
+        onError: (Object e) {
+          doneA = true;
+          errorA = e;
+        },
+      ),
+    );
+
+    Future<void> waitUntil(bool Function() stop) async {
+      while (!stop()) {
+        if (_closed) throw const _SessionClosed();
+        if ((_fetchGen[idx] ?? 0) != gen) throw const _FetchCancelled();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+      }
+    }
+
+    final hedgeAt = DateTime.now().add(playheadHedgeAfter);
+    await waitUntil(
+      () =>
+          _haveBytes(idx) > before ||
+          doneA ||
+          !DateTime.now().isBefore(hedgeAt),
+    );
+    if (_haveBytes(idx) > before) {
+      await _awaitLeader(futA, () => dropA);
+      return;
+    }
+    if (errorA is _SessionClosed) throw const _SessionClosed();
+    if (errorA is _FetchCancelled && (_fetchGen[idx] ?? 0) != gen) {
+      throw const _FetchCancelled();
+    }
+    final hostA = Uri.tryParse(urlA)?.host ?? urlA;
+    final urlB = _pickHost(hostA);
+    if (urlB == null || urlB == urlA) {
+      if (!doneA) {
+        try {
+          await futA;
+        } catch (e) {
+          _noteConnectFail(urlA, range, e);
+          rethrow;
+        }
+        return;
+      }
+      _noteConnectFail(urlA, range, errorA ?? 'no-bytes');
+      throw errorA ?? StateError('no-progress idx=$idx');
+    }
+    _noteConnectFail(
+      urlA,
+      range,
+      errorA ?? 'no-bytes ${playheadHedgeAfter.inMilliseconds}ms',
+    );
+    VodProxyLog.log(
+      'hedge id=$id idx=$idx range=$range from=$hostA '
+      'alt=${Uri.tryParse(urlB)?.host ?? urlB}',
+    );
+    retries++;
+    final hedgeBox = _ReqBox();
+    boxB = hedgeBox;
+    final futB = _getOrKick(
+      urlB,
+      range,
+      urgent: true,
+      liveIdx: idx,
+      fetchGen: gen,
+      onFileBytes: (offset, slice) => take(2, offset, slice),
+      abandoned: () => dropB,
+      box: hedgeBox,
+      track: idx,
+    );
+    unawaited(
+      futB.then<void>(
+        (_) {
+          doneB = true;
+        },
+        onError: (Object e) {
+          doneB = true;
+          errorB = e;
+        },
+      ),
+    );
+    await waitUntil(() => _haveBytes(idx) > before || (doneA && doneB));
+    if (_haveBytes(idx) > before) {
+      if (dropA) {
+        await _awaitLeader(futB, () => dropB);
+      } else {
+        dropB = true;
+        _abortBox(hedgeBox);
+        await _awaitLeader(futA, () => dropA);
+      }
+      return;
+    }
+    if (errorB is _SessionClosed) throw const _SessionClosed();
+    if (errorB is _FetchCancelled && (_fetchGen[idx] ?? 0) != gen) {
+      throw const _FetchCancelled();
+    }
+    _noteConnectFail(urlB, range, errorB ?? errorA ?? 'no-bytes');
+    throw errorB ?? errorA ?? StateError('no-progress idx=$idx');
+  }
+
+  Future<void> _awaitLeader<T>(
+    Future<T> future,
+    bool Function() dropped,
+  ) async {
+    try {
+      await future;
+    } on _FetchCancelled {
+      if (!dropped()) rethrow;
+    } on _HostKicked {
+      if (!dropped()) rethrow;
+    }
+  }
+
+  String? _pickHost(String? avoid) {
+    final allowBanned = pool.available.isEmpty;
+    var url = pool.pickUrl(
+      avoidHost: avoid,
+      allowBanned: allowBanned,
+      kind: kind,
+    );
+    if (url == null || url.isEmpty) {
+      final primary = pool.primaryUrl;
+      if (primary.isNotEmpty && (allowBanned || !pool.isUrlBanned(primary))) {
+        if (avoid == null || Uri.tryParse(primary)?.host != avoid) {
+          url = primary;
+        }
+      }
+    }
+    if (url == null || url.isEmpty) return null;
+    return url;
+  }
+
+  void _noteConnectFail(String url, ByteRange range, Object reason) {
+    if (reason is _SessionClosed ||
+        reason is _FetchCancelled ||
+        reason is _HostKicked) {
+      return;
+    }
+    if (!_connectLike(reason) && !reason.toString().startsWith('no-bytes')) {
+      _noteFetchFail(url, range, reason);
+      return;
+    }
+    final banned = pool.banConnect(
+      url,
+      reason: reason.toString(),
+      ban: connectBanFor,
+    );
+    VodProxyLog.log(
+      'retry id=$id range=$range from=${Uri.tryParse(url)?.host ?? url} '
+      'reason=$reason${banned ? '' : ' (already-banned)'}',
+    );
+  }
+
+  void _abortBox(_ReqBox box) {
+    try {
+      box.req?.abort(const _FetchCancelled());
+    } catch (_) {}
+  }
+
+  Duration _firstByteTimeout(bool urgent) {
+    const urgentCap = Duration(seconds: 3);
+    if (!urgent) return attemptTimeout;
+    return attemptTimeout < urgentCap ? attemptTimeout : urgentCap;
+  }
+
+  Duration _stallTimeout() =>
+      cursorWatchdog < attemptTimeout ? cursorWatchdog : attemptTimeout;
 
   Future<({Uint8List bytes, int total})> _fetchRange(
     ByteRange range, {
     required bool urgent,
     String? avoidHost,
+    int? liveIdx,
+    int? fetchGen,
+    void Function(int offset, Uint8List slice)? onFileBytes,
   }) async {
     Object? lastError;
     String? lastHost = avoidHost;
     final deadline = DateTime.now().add(fetchBudget);
-    final idx = range.start ~/ chunkSize;
+    final idx = liveIdx ?? range.start ~/ chunkSize;
     var attempt = 0;
-    while (DateTime.now().isBefore(deadline)) {
+    var cursor = range.start;
+    var total = fileSize ?? 0;
+    final assembled = onFileBytes == null ? BytesBuilder(copy: false) : null;
+    while (cursor < range.endExclusive && DateTime.now().isBefore(deadline)) {
       if (_closed) throw const _SessionClosed();
+      if (fetchGen != null && (_fetchGen[idx] ?? 0) != fetchGen) {
+        throw const _FetchCancelled();
+      }
       attempt++;
       final remaining = deadline.difference(DateTime.now());
       if (remaining.inMilliseconds < 50) break;
@@ -560,26 +993,43 @@ class VodSession {
       }
       lastHost = Uri.tryParse(url)?.host;
       if (lastHost != null) _inflightHost[idx] = lastHost;
-      final cap = urgent ? const Duration(seconds: 3) : attemptTimeout;
-      final perTry = remaining < cap ? remaining : cap;
+      final piece = ByteRange(cursor, range.endExclusive);
       try {
-        final result = await _getOrKick(url, range, perTry);
-        if (result.bytes.length != range.length) {
+        final result = await _getOrKick(
+          url,
+          piece,
+          urgent: urgent,
+          liveIdx: liveIdx,
+          fetchGen: fetchGen,
+          onFileBytes: onFileBytes,
+        );
+        if (result.bytes.isEmpty) {
           retries++;
-          lastError = _noteFetchFail(url, range, 'short-read');
+          lastError = _noteFetchFail(url, piece, 'empty');
           continue;
         }
+        total = result.total;
+        if (assembled != null) assembled.add(result.bytes);
         _bytesNet += result.bytes.length;
-        return result;
+        cursor += result.bytes.length;
+        if (result.complete || cursor >= range.endExclusive) {
+          return (
+            bytes: assembled?.takeBytes() ?? Uint8List(0),
+            total: total,
+          );
+        }
+        retries++;
+        lastError = _noteFetchFail(url, piece, 'stall');
+      } on _FetchCancelled {
+        rethrow;
       } on _HostKicked {
         lastError = 'kicked';
         await Future<void>.delayed(const Duration(milliseconds: 40));
-        continue;
       } on _Forbidden {
         retries++;
         lastError = _noteFetchFail(
           url,
-          range,
+          piece,
           '403',
           ban: const Duration(seconds: 45),
         );
@@ -588,7 +1038,7 @@ class VodSession {
       } catch (e) {
         if (_closed) throw const _SessionClosed();
         retries++;
-        lastError = _noteFetchFail(url, range, e);
+        lastError = _noteFetchFail(url, piece, e);
       }
     }
     final why = lastError ?? 'deadline ${fetchBudget.inSeconds}s n=$attempt';
@@ -617,33 +1067,67 @@ class VodSession {
     return reason;
   }
 
-  Future<({Uint8List bytes, int total})> _getOrKick(
+  Future<_RangeBody> _getOrKick(
     String url,
-    ByteRange range,
-    Duration perTry,
-  ) {
+    ByteRange range, {
+    required bool urgent,
+    int? liveIdx,
+    int? fetchGen,
+    bool probe = false,
+    void Function(int total, HttpClientRequest req)? onReady,
+    void Function(int offset, Uint8List slice)? onFileBytes,
+    bool Function()? abandoned,
+    _ReqBox? box,
+    int? track,
+  }) {
     final host = (Uri.tryParse(url)?.host ?? '').toLowerCase();
     final epochAtStart = _kickEpoch;
-    final done = Completer<({Uint8List bytes, int total})>();
-    var settled = false;
-    void settle(void Function() fn) {
-      if (settled) return;
-      settled = true;
-      fn();
+    final slot = box ?? _ReqBox();
+    if (track != null) _trackBox(track, slot);
+    var stop = false;
+    final future = _get(
+      url,
+      range,
+      probe: probe,
+      urgent: urgent,
+      liveIdx: liveIdx,
+      fetchGen: fetchGen,
+      onReady: onReady,
+      onFileBytes: onFileBytes,
+      box: slot,
+      abandoned: abandoned,
+    );
+    // A second listener so the kick-watcher can stop. Its future must handle
+    // the same error the caller awaits, or a timeout/cancel is also uncaught.
+    unawaited(
+      future.then<void>(
+        (_) {
+          stop = true;
+        },
+        onError: (Object _) {
+          stop = true;
+        },
+      ),
+    );
+    if (track != null) {
+      unawaited(
+        future.then<void>(
+          (_) {
+            _dropBox(track, slot);
+          },
+          onError: (_) {
+            _dropBox(track, slot);
+          },
+        ),
+      );
     }
-
-    _get(url, range)
-        .timeout(perTry)
-        .then(
-          (result) => settle(() => done.complete(result)),
-          onError: (Object e, StackTrace st) =>
-              settle(() => done.completeError(e, st)),
-        );
     void watchKick() {
       _wake.future.then((_) {
-        if (settled) return;
+        if (stop) return;
         if (_kickEpoch != epochAtStart && _kickedHost == host) {
-          settle(() => done.completeError(const _HostKicked()));
+          try {
+            slot.req?.abort(const _HostKicked());
+          } catch (_) {}
           return;
         }
         watchKick();
@@ -651,16 +1135,55 @@ class VodSession {
     }
 
     watchKick();
-    return done.future;
+    return future;
   }
 
-  Future<({Uint8List bytes, int total})> _get(
+  Future<_RangeBody> _get(
     String url,
     ByteRange range, {
     bool probe = false,
+    bool urgent = false,
+    int? liveIdx,
+    int? fetchGen,
+    void Function(int total, HttpClientRequest req)? onReady,
+    void Function(int offset, Uint8List slice)? onFileBytes,
+    _ReqBox? box,
+    bool Function()? abandoned,
+    Duration? firstByteTimeout,
+    Duration? stallTimeout,
   }) async {
+    final firstByte = firstByteTimeout ?? _firstByteTimeout(urgent || probe);
+    final stall = stallTimeout ?? _stallTimeout();
     final sw = Stopwatch()..start();
-    final req = await _client.getUrl(Uri.parse(url));
+    final deadline = DateTime.now().add(firstByte);
+    Duration left() {
+      final ms = deadline.difference(DateTime.now()).inMilliseconds;
+      return Duration(milliseconds: ms < 1 ? 0 : ms);
+    }
+
+    void giveUp(HttpClientRequest? request) {
+      if (abandoned?.call() != true) return;
+      try {
+        request?.abort(const _FetchCancelled());
+      } catch (_) {}
+      throw const _FetchCancelled();
+    }
+
+    final playhead = urgent && !probe;
+    final uri = Uri.parse(url);
+    final hook = debugOpenRequest;
+    final Future<HttpClientRequest> opening = hook != null
+        ? hook(uri, urgent: playhead)
+        : (playhead ? _urgentClient : _client).getUrl(uri);
+    final HttpClientRequest req;
+    try {
+      req = await opening.timeout(left());
+    } on TimeoutException {
+      throw TimeoutException('connect $range');
+    }
+    giveUp(req);
+    box?.req = req;
+    if (liveIdx != null) _requests[liveIdx] = req;
     req.headers.set(HttpHeaders.refererHeader, HttpString.baseUrl);
     req.headers.set(HttpHeaders.userAgentHeader, BrowserUa.pc);
     req.headers.set(
@@ -668,80 +1191,143 @@ class VodSession {
       'bytes=${range.start}-${range.endInclusive}',
     );
     req.followRedirects = true;
-    final resp = await req.close().timeout(const Duration(seconds: 10));
+    void ensureLive() {
+      if (_closed) throw const _SessionClosed();
+      if (liveIdx != null &&
+          fetchGen != null &&
+          (_fetchGen[liveIdx] ?? 0) != fetchGen) {
+        throw const _FetchCancelled();
+      }
+    }
+
+    ensureLive();
+    giveUp(req);
+    final HttpClientResponse resp;
+    try {
+      resp = await req.close().timeout(left());
+    } on TimeoutException {
+      try {
+        req.abort(TimeoutException('headers'));
+      } catch (_) {}
+      rethrow;
+    }
     final ttfbMs = sw.elapsedMilliseconds;
     if (firstTtfbMs == 0) firstTtfbMs = ttfbMs;
     if (resp.statusCode == 403) {
       await resp.drain<void>().catchError((_) {});
       throw _Forbidden();
     }
-    final body = await consolidate(resp);
+
+    final int expect;
+    final int total;
+    var skipLeft = 0;
     if (resp.statusCode == 206) {
       final parsed = ContentRangeReply.parse(
         resp.headers.value(HttpHeaders.contentRangeHeader),
       );
-      if (parsed == null) {
+      if (parsed == null || parsed.start > range.start) {
         throw StateError(
-          'bad Content-Range ${resp.headers.value(HttpHeaders.contentRangeHeader)}',
+          'bad Content-Range ${resp.headers.value(HttpHeaders.contentRangeHeader)} for $range',
         );
       }
       fileSize ??= parsed.total;
-      final slice = _sliceCovered(body, parsed, range);
-      if (slice.length != range.length) {
-        if (probe &&
-            range.start == 0 &&
-            parsed.total > 0 &&
-            slice.length == parsed.total) {
-          // File shorter than the probe window — still a valid 206.
-        } else {
-          throw StateError(
-            'short-read got=${slice.length} want=${range.length}',
-          );
-        }
+      total = parsed.total;
+      onReady?.call(total, req);
+      final available = parsed.total - range.start;
+      if (available <= 0) {
+        throw StateError('Content-Range $parsed missed $range');
       }
-      pool.recordSuccess(
-        url,
-        bytes: slice.length,
-        elapsedMs: sw.elapsedMilliseconds,
-        ttfbMs: ttfbMs,
-        probe: probe,
-      );
-      return (bytes: slice, total: parsed.total);
-    }
-    if (resp.statusCode == 200) {
+      expect = min(range.length, available);
+      skipLeft = range.start - parsed.start;
+    } else if (resp.statusCode == 200 && range.start == 0) {
       final cl = int.tryParse(
         resp.headers.value(HttpHeaders.contentLengthHeader) ?? '',
       );
       if (cl != null && cl > 0) fileSize ??= cl;
-      if (body.length >= range.length && range.start == 0) {
-        pool.recordSuccess(
-          url,
-          bytes: range.length,
-          elapsedMs: sw.elapsedMilliseconds,
-          ttfbMs: ttfbMs,
-          probe: probe,
-        );
-        return (
-          bytes: body.sublist(0, range.length),
-          total: fileSize ?? cl ?? body.length,
-        );
-      }
+      total = fileSize ?? cl ?? 0;
+      if (total > 0) onReady?.call(total, req);
+      expect = total > 0 ? min(range.length, total) : range.length;
+    } else {
+      throw StateError('http ${resp.statusCode}');
     }
-    throw StateError('http ${resp.statusCode} len=${body.length}');
-  }
 
-  static Uint8List _sliceCovered(
-    Uint8List body,
-    ContentRangeReply parsed,
-    ByteRange range,
-  ) {
-    final recvStart = parsed.start;
-    final offset = range.start - recvStart;
-    if (offset < 0 || offset >= body.length) {
-      throw StateError('Content-Range $parsed missed $range');
+    final builder = BytesBuilder(copy: false);
+    var taken = 0;
+    var clean = true;
+    var kicked = false;
+    final iterator = StreamIterator<List<int>>(resp);
+    var limit = firstByte;
+    try {
+      while (taken < expect) {
+        ensureLive();
+        if (abandoned?.call() == true) {
+          giveUp(req);
+        }
+        if (_kickEpoch != 0 &&
+            box != null &&
+            _kickedHost == (Uri.tryParse(url)?.host ?? '').toLowerCase() &&
+            _requests[liveIdx ?? -2] != req) {
+          // Kick is observed via abort below.
+        }
+        bool ok;
+        try {
+          ok = await iterator.moveNext().timeout(limit);
+        } on TimeoutException {
+          clean = false;
+          try {
+            req.abort(TimeoutException('no-bytes'));
+          } catch (_) {}
+          break;
+        } catch (e) {
+          clean = false;
+          kicked = e is _HostKicked;
+          break;
+        }
+        if (!ok) break;
+        limit = stall;
+        var data = iterator.current;
+        if (data is! Uint8List) data = Uint8List.fromList(data);
+        if (skipLeft > 0) {
+          if (data.length <= skipLeft) {
+            skipLeft -= data.length;
+            continue;
+          }
+          data = Uint8List.sublistView(data, skipLeft);
+          skipLeft = 0;
+        }
+        final room = expect - taken;
+        if (data.length > room) {
+          data = Uint8List.sublistView(data, 0, room);
+        }
+        final slice = Uint8List.fromList(data);
+        builder.add(slice);
+        onFileBytes?.call(range.start + taken, slice);
+        taken += slice.length;
+      }
+    } finally {
+      await iterator.cancel();
     }
-    final end = min(offset + range.length, body.length);
-    return Uint8List.sublistView(body, offset, end);
+    final bytes = builder.takeBytes();
+    final complete = clean && taken == expect && taken > 0;
+    if (complete) {
+      pool.recordSuccess(
+        url,
+        bytes: bytes.length,
+        elapsedMs: sw.elapsedMilliseconds,
+        ttfbMs: ttfbMs,
+        probe: probe,
+        kind: kind,
+      );
+      return _RangeBody(bytes: bytes, total: total, complete: true);
+    }
+    if (taken == 0) {
+      if (kicked) throw const _HostKicked();
+      throw TimeoutException('no-bytes $range');
+    }
+    if (probe) {
+      throw StateError('probe-short got=$taken want=$expect');
+    }
+    return _RangeBody(bytes: bytes, total: total, complete: false);
   }
 
   static Future<Uint8List> consolidate(HttpClientResponse resp) async {
@@ -800,16 +1386,53 @@ class VodSession {
     _readEpoch++;
     _statsTimer?.cancel();
     _statsTimer = null;
+    _abortProbeBody();
+    for (final req in _requests.values.toList()) {
+      try {
+        req.abort(const _SessionClosed());
+      } catch (_) {}
+    }
+    for (final boxes in _boxes.values) {
+      for (final box in boxes) {
+        try {
+          box.req?.abort(const _SessionClosed());
+        } catch (_) {}
+      }
+    }
+    _requests.clear();
+    _boxes.clear();
     _wakeWaiters();
     logSessionEnd(reason: reason);
     _chunks.clear();
+    _partial.clear();
     _inflight.clear();
     _inflightHost.clear();
     _client.close(force: true);
+    _urgentClient.close(force: true);
   }
 }
 
+class _RangeBody {
+  const _RangeBody({
+    required this.bytes,
+    required this.total,
+    required this.complete,
+  });
+
+  final Uint8List bytes;
+  final int total;
+  final bool complete;
+}
+
+class _ReqBox {
+  HttpClientRequest? req;
+}
+
 class _Forbidden implements Exception {}
+
+class _FetchCancelled implements Exception {
+  const _FetchCancelled();
+}
 
 class _HostKicked implements Exception {
   const _HostKicked();

@@ -563,7 +563,7 @@ class _LinuxContextMenuButton extends StatefulWidget {
 
 class _LinuxContextMenuButtonState extends State<_LinuxContextMenuButton> {
   static const _channel = MethodChannel(
-    'com.example.piliplus/linux_context_menu',
+    'com.example.pilinara/linux_context_menu',
   );
   static int _nextRequestId = 0;
   int? _requestId;

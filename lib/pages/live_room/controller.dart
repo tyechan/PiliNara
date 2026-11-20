@@ -41,6 +41,8 @@ import 'package:PiliPlus/utils/extension/rx_ext.dart';
 import 'package:PiliPlus/utils/global_data.dart';
 import 'package:PiliPlus/utils/num_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
+import 'package:PiliPlus/utils/storage.dart';
+import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/theme_utils.dart';
 import 'package:PiliPlus/utils/utils.dart';
@@ -291,9 +293,9 @@ class LiveRoomController extends GetxController {
       return null;
     }
 
-    // 如果播放器已被彻底销毁（例如在其他页面关闭了小窗），重新获取单例实例
-    if (plPlayerController.videoPlayerController == null) {
-      plPlayerController = PlPlayerController.ensureInstance(isLive: true);
+    // 当前引用已失效时，重新取得单例并持有一次引用。
+    if (!identical(plPlayerController, PlPlayerController.instance)) {
+      plPlayerController = PlPlayerController.getInstance(isLive: true);
     }
 
     // 确保播放器处于直播模式
@@ -1204,5 +1206,15 @@ class LiveRoomController extends GetxController {
       }
     }
     fansMedalData.refresh();
+  }
+  void toggleDanmaku() {
+    final newVal = !plPlayerController.enableShowLiveDanmaku.rawValue;
+    plPlayerController.enableShowLiveDanmaku.value = newVal;
+    if (!plPlayerController.tempPlayerConf) {
+      GStorage.setting.put(
+        SettingBoxKey.enableShowLiveDanmaku,
+        newVal,
+      );
+    }
   }
 }
