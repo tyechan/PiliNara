@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart' as ugc;
+import 'package:material_ui/material_ui.dart';
 
 const double _kTopPadding = 7;
 const double _kBottomPadding = 100;
@@ -60,16 +61,12 @@ double calcItemHeight(ugc.BaseEpisodeItem episode) {
   required int index,
   required int itemCount,
   double extent = _kItemHeight,
-  bool isReversed = false,
   double topPadding = _kTopPadding,
   double bottomPadding = _kBottomPadding,
 }) {
-  double offset = extent * index;
+  final offset = extent * index;
   final remain = (itemCount - index - 1) * extent;
-  return (
-    offset + (isReversed ? bottomPadding : topPadding),
-    remain + (isReversed ? topPadding : bottomPadding),
-  );
+  return (offset + topPadding, remain + bottomPadding);
 }
 
 const double kPageItemExtent = 150;
@@ -78,12 +75,11 @@ double calcPageItemOffset({
   required int index,
   required int itemCount,
   double extent = kPageItemExtent,
-  double itemExtent = kPageItemExtent,
   required double viewportDimension,
 }) {
   if (index <= 0) return 0.0;
-  final halfExtent = itemExtent / 2.0;
-  final offset = math.max(0.0, index * itemExtent - halfExtent);
+  final halfExtent = extent / 2.0;
+  final offset = math.max(0.0, index * extent - halfExtent);
   final remain = (itemCount - index - 1) * extent;
   final total = remain + extent + halfExtent;
   if (total < viewportDimension) {
@@ -97,7 +93,6 @@ double calcPageItemOffsetSeparated({
   required int itemCount,
   required double extent,
   required double separator,
-  double itemExtent = kPageItemExtent,
   required double viewportDimension,
 }) {
   if (index <= 0) return 0.0;
@@ -113,4 +108,24 @@ double calcPageItemOffsetSeparated({
     return math.max(0.0, offset - viewportDimension + total);
   }
   return offset;
+}
+
+mixin ScrollOffsetMixin<T extends StatefulWidget> on State<T> {
+  int get itemIndex;
+  int get itemCount;
+  ScrollController get scrollController;
+
+  void jumpToCurrent([_]) {
+    final position = scrollController.position;
+    final (double offset, double remain) = calcFixedItemOffset(
+      index: itemIndex,
+      itemCount: itemCount,
+    );
+    final adjustOffset = adjustScrollOffset(
+      offset: offset,
+      remain: remain,
+      viewportDimension: position.viewportDimension,
+    );
+    position.jumpTo(adjustOffset);
+  }
 }

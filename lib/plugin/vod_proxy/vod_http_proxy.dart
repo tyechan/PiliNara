@@ -28,6 +28,10 @@ class VodHttpProxy {
   DateTime? lastRequestAt;
   int requestsServed = 0;
   void Function()? onCursorStuck;
+
+  /// Test hook for a host whose TCP connect never completes.
+  Future<HttpClientRequest> Function(Uri uri, {required bool urgent})?
+  debugOpenRequest;
   Future<void> _wrapTail = Future<void>.value();
   Timer? _orphanWatch;
   String? _currentVideoId;
@@ -70,10 +74,14 @@ class VodHttpProxy {
   }
 
   void closeAll({String reason = 'close'}) {
+    // A new video must stop the previous session now. Parking it for
+    // lingerClosedFor kept the old CDN downloads running.
     final hard =
         reason == 'reset-test' ||
         reason == 'dispose' ||
-        reason == 'force-direct';
+        reason == 'force-direct' ||
+        reason == 'new-wrap' ||
+        reason == 'media-change';
     if (_sessions.isEmpty && (!hard || _lingering.isEmpty)) return;
     if (_sessions.isNotEmpty) {
       VodProxyLog.log('close reason=$reason n=${_sessions.length}');
@@ -167,6 +175,24 @@ class VodHttpProxy {
     _syncOrphanWatch();
   }
 
+  /// Hard-stop every session and the loopback server.
+  ///
+  /// Used when the task is removed. [closeAll] alone leaves [HttpServer]
+  /// bound, and mpv can keep reading it after the media session is gone.
+  Future<void> shutdown() async {
+    closeAll(reason: 'dispose');
+    _orphanWatch?.cancel();
+    _orphanWatch = null;
+    _currentVideoId = null;
+    _currentAudioId = null;
+    final server = _server;
+    _server = null;
+    port = null;
+    try {
+      await server?.close(force: true);
+    } catch (_) {}
+  }
+
   Future<void> resetForTest() async {
     VodProxyLog.resetForTest();
     VodHostHealth.instance.resetForTest();
@@ -176,6 +202,7 @@ class VodHttpProxy {
     requestsServed = 0;
     lastRequestAt = null;
     onCursorStuck = null;
+    debugOpenRequest = null;
     orphanAfter = defaultOrphanAfter;
     _currentVideoId = null;
     _currentAudioId = null;
@@ -278,6 +305,18 @@ class VodHttpProxy {
     );
     final videoSession = _sessions[videoId];
     if (videoSession == null) return null;
+    String? audioId;
+    VodSession? audioSession;
+    Future<int>? audioReady;
+    if (source.audioSource case final a? when a.isNotEmpty) {
+      audioId = _register(
+        kind: 'audio',
+        primary: a,
+        extras: source.audioCandidates,
+      );
+      audioSession = _sessions[audioId];
+      audioReady = audioSession?.ensureSize();
+    }
     try {
       await videoSession.ensureSize();
     } catch (e) {
@@ -286,26 +325,24 @@ class VodHttpProxy {
       videoSession.close(reason: 'probe-failed');
       _sessions.remove(videoId);
       _currentVideoId = null;
+      if (audioId != null) {
+        audioSession?.close(reason: 'probe-failed');
+        _sessions.remove(audioId);
+      }
       return null;
     }
     String? audio;
-    if (source.audioSource case final a? when a.isNotEmpty) {
-      final audioId = _register(
-        kind: 'audio',
-        primary: a,
-        extras: source.audioCandidates,
-      );
-      final audioSession = _sessions[audioId];
+    if (audioReady != null) {
       try {
-        await audioSession!.ensureSize();
-        audio = _url(audioId);
+        await audioReady;
+        audio = _url(audioId!);
         _currentAudioId = audioId;
       } catch (e) {
         VodProxyLog.log('probe-failed audio $e — using direct audio');
         audioSession?.fallbackReason = e.toString();
         audioSession?.close(reason: 'probe-failed');
         _sessions.remove(audioId);
-        audio = a;
+        audio = source.audioSource;
         _currentAudioId = null;
       }
     } else {
@@ -442,6 +479,7 @@ class VodHttpProxy {
       backBufferBytes: backBufferBytes,
     );
     session.onCursorStuck = () => onCursorStuck?.call();
+    session.debugOpenRequest = debugOpenRequest;
     session.noteClient();
     _sessions[id] = session;
     _syncOrphanWatch();

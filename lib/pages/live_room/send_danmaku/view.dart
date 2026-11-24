@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:PiliPlus/common/style.dart';
 import 'package:PiliPlus/common/widgets/button/toolbar_icon_button.dart';
 import 'package:PiliPlus/common/widgets/flutter/text_field/text_field.dart';
@@ -155,22 +153,29 @@ class _ReplyPageState extends CommonRichTextPubPageState<LiveSendDmPanel> {
           left: 15,
           bottom: 10,
         ),
-        child: RichTextField(
-          key: key,
-          controller: editController,
-          minLines: 1,
-          maxLines: 2,
-          autofocus: false,
-          textInputAction: TextInputAction.send,
-          onChanged: onChanged,
-          onSubmitted: onSubmitted,
-          focusNode: focusNode,
-          decoration: const InputDecoration(
-            hintText: "输入弹幕内容",
-            border: InputBorder.none,
-            hintStyle: TextStyle(fontSize: 14),
+        child: Listener(
+          onPointerUp: (event) {
+            if (panelType.value != .keyboard) {
+              updatePanelType(.keyboard);
+            }
+          },
+          child: RichTextField(
+            key: key,
+            controller: editController,
+            minLines: 1,
+            maxLines: 2,
+            autofocus: false,
+            textInputAction: TextInputAction.send,
+            onChanged: onChanged,
+            onSubmitted: onSubmitted,
+            focusNode: focusNode,
+            decoration: const InputDecoration(
+              hintText: "输入弹幕内容",
+              border: InputBorder.none,
+              hintStyle: TextStyle(fontSize: 14),
+            ),
+            style: theme.textTheme.bodyLarge,
           ),
-          style: theme.textTheme.bodyLarge,
         ),
       ),
       Divider(

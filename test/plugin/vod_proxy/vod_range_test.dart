@@ -200,6 +200,32 @@ void main() {
     expect(pool.describe(), contains('mirrorhw'));
   });
 
+  test('one connect failure bans the host for 45s', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final pool = VodHostPool([ali, hw], random: Random(1));
+    expect(
+      pool.banConnect(ali, reason: 'SocketException: connect timed out'),
+      isTrue,
+    );
+    expect(
+      pool.available.map((h) => h.host),
+      isNot(contains('upos-sz-mirrorali.bilivideo.com')),
+    );
+    expect(pool.pickUrl(kind: 'video'), contains('mirrorhw'));
+    final until = pool.hosts
+        .firstWhere((h) => h.host.contains('mirrorali'))
+        .blacklistedUntil!;
+    expect(
+      until.difference(DateTime.now()).inSeconds,
+      inInclusiveRange(40, 45),
+    );
+    expect(
+      pool.banConnect(ali, reason: 'SocketException: connect timed out'),
+      isFalse,
+    );
+  });
+
   test('3 timeouts in 30s ban even when successes interleave', () {
     const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
     const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
@@ -356,6 +382,28 @@ void main() {
       pool.topHosts(k: 2, kind: 'video').last.host,
       'upos-sz-mirrorcosov.bilivideo.com',
     );
+  });
+
+  test('next session seeds ranking from the previous host stats', () {
+    const ali = 'https://upos-sz-mirrorali.bilivideo.com/a.m4s';
+    const hw = 'https://upos-sz-mirrorhw.bilivideo.com/a.m4s';
+    final first = VodHostPool([ali, hw], random: Random(1));
+    first.recordSuccess(
+      ali,
+      bytes: 512 * 1024,
+      elapsedMs: 200,
+      kind: 'video',
+    );
+    final seeded = first.hosts
+        .firstWhere((h) => h.host.contains('mirrorali'))
+        .emaBps;
+    expect(seeded, greaterThan(1));
+    final second = VodHostPool([hw, ali], random: Random(1));
+    expect(second.hosts.every((h) => h.emaBps == 0), isTrue);
+    second.seedFromHealth('video');
+    final again = second.hosts.firstWhere((h) => h.host.contains('mirrorali'));
+    expect(again.emaBps, seeded);
+    expect(second.preferredHost(kind: 'video')!.host, contains('mirrorali'));
   });
 
   test('unban does not fire before the 30s floor', () {

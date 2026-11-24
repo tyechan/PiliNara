@@ -102,8 +102,6 @@ Widget buildDmChart(
   );
 }
 
-const _kBarMargin = 20.0;
-
 Widget buildSeekPreviewWidget(
   PlPlayerController plPlayerController,
   double maxWidth,

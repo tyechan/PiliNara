@@ -195,7 +195,7 @@ class _EpisodePanelState extends State<EpisodePanel> {
             if (item.badge == '会员' && !_isVip) {
               SmartDialog.showToast('需要大会员');
             }
-            widget.onChangeEpisode(item, episodeType: .episode);
+            widget.onChangeEpisode(item, episodeType: .episode, manual: true);
           },
           child: Padding(
             padding: const .symmetric(vertical: 8, horizontal: 10),

@@ -94,7 +94,7 @@ class DetailItem extends StatelessWidget {
     final theme = Theme.of(context);
     final outline = theme.colorScheme.outline;
     final cid = entry.source?.cid ?? entry.pageData?.cid;
-    final canDel = entry.isCompleted;
+    final canActInPlace = entry.isCompleted || onDelete != null;
     final enableMultiSelect = controller.enableMultiSelect.value;
     void onLongPress() {
       if (enableMultiSelect) {
@@ -108,7 +108,7 @@ class DetailItem extends StatelessWidget {
       child: InkWell(
         onTap: enableTap
             ? () async {
-                if (!canDel) {
+                if (!canActInPlace) {
                   Get.to(const DownloadingPage());
                   return;
                 }
@@ -140,7 +140,7 @@ class DetailItem extends StatelessWidget {
                       downloadNext: false,
                     );
                   } else {
-                    downloadService.startDownload(entry);
+                    downloadService.queueDownload(entry);
                   }
                 }
               }
@@ -566,6 +566,15 @@ class DetailItem extends StatelessWidget {
                         entry: entry,
                         isUpdate: true,
                       );
+                      SmartDialog.showToast(res ? '更新成功' : '更新失败');
+                    },
+                  ),
+                if (canDel && entry.isCompleted)
+                  CustomPopupMenuItem<void>(
+                    height: 38,
+                    child: const Text('更新字幕、分段信息', style: TextStyle(fontSize: 13)),
+                    onTap: () async {
+                      final res = await downloadService.updatePlayInfo(entry);
                       SmartDialog.showToast(res ? '更新成功' : '更新失败');
                     },
                   ),
